@@ -34,7 +34,7 @@ class MountAndBladeIIModDataChecker(mobase.ModDataChecker):
 
 class MountAndBladeIIGame(BasicGame):
     Name = "Mount & Blade II: Bannerlord"
-    Author = "Holt59"
+    Author = "Holt59, updated by d&h"
     Version = "0.1.1"
     Description = "Adds support for Mount & Blade II: Bannerlord"
 
