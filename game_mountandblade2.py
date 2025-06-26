@@ -10,9 +10,6 @@ from ..basic_features.basic_save_game_info import BasicGameSaveGame, format_date
 import logging
 from collections.abc import Mapping
 
-# Set up logging
-logging.basicConfig(level=logging.DEBUG, filename='V:/Knightfall/modorganizer_plugin.log', filemode='a', format='%(asctime)s - %(levelname)s - %(message)s')
-
 class BannerlordSaveGame(BasicGameSaveGame):
     def __init__(self, filepath: Path):
         super().__init__(filepath)
