@@ -11,7 +11,6 @@ import logging
 from collections.abc import Mapping
 from enum import IntEnum
 
-
 class BannerlordSaveGame(BasicGameSaveGame):
     def __init__(self, filepath: Path):
         super().__init__(filepath)
@@ -86,7 +85,10 @@ def getMetadata(savepath: Path, save: mobase.ISaveGame) -> Mapping[str, str]:
         "Saved at": format_date(save.getCreationTime()),
         "File Size": file_size,
     }
-
+    
+    
+    
+    
 class MountAndBladeIIModDataChecker(mobase.ModDataChecker):
     _valid_folders: list[str] = [
         "native",
@@ -101,20 +103,20 @@ class MountAndBladeIIModDataChecker(mobase.ModDataChecker):
     def __init__(self):
         super().__init__()
 
-    def dataLooksValid(self, filetree: mobase.IFileTree) -> mobase.ModDataChecker.CheckReturn:
-        logging.debug("Checking mod data validity")
+    def dataLooksValid(
+        self, filetree: mobase.IFileTree
+    ) -> mobase.ModDataChecker.CheckReturn:
         for e in filetree:
-            if e.isDir() and e.name().lower() in self._valid_folders:
-                logging.info(f"Valid mod folder detected: {e.name()}")
-                return mobase.ModDataChecker.VALID
-            if e.isFile() and e.name().lower() == "submodule.xml":
-                logging.info(f"Valid mod file detected: {e.name()}")
-                return mobase.ModDataChecker.VALID
-            if e.isFile() and e.name().lower().endswith(".asset"):
-                logging.warning("Mod contains .asset files but no SubModule.xml; may not load correctly")
-                return mobase.ModDataChecker.FIXABLE
-        logging.debug("No valid mod structure detected")
+            if e.isDir():
+                if e.name().lower() in self._valid_folders:
+                    return mobase.ModDataChecker.VALID
+                if e.exists("SubModule.xml", mobase.IFileTree.FILE):  # type: ignore
+                    return mobase.ModDataChecker.VALID
+
         return mobase.ModDataChecker.INVALID
+        
+        
+
 
 class BannerlordModDataContent(mobase.ModDataContent):
     class Content(IntEnum):
@@ -137,7 +139,7 @@ class BannerlordModDataContent(mobase.ModDataContent):
                 self.Content.CONFIG, "Configs", ":/MO/gui/content/inifile"
             ),
             mobase.ModDataContent.Content(
-                self.Content.SCENE, "Scenes", ":/MO/gui/content/geometries"
+                self.Content.SCENE, "Scenes", ":/MO/gui/content/mesh"
             ),
             mobase.ModDataContent.Content(
                 self.Content.ASSETS, "Assets", ":/MO/gui/content/mesh"
@@ -158,7 +160,7 @@ class BannerlordModDataContent(mobase.ModDataContent):
                     logging.debug(f"Detected Textures content for folder: {path}/{name}")
             elif entry.isFile():
                 ext = entry.suffix().lower()
-                if ext == ["tpac", "png", "dds"]:
+                if ext in ["tpac", "png", "dds"]:
                     content.append(self.Content.TEXTURE)
                     logging.debug(f"Detected Textures content for file: {path}/{name}")
                 elif ext == "dll":
@@ -169,8 +171,8 @@ class BannerlordModDataContent(mobase.ModDataContent):
                     logging.debug(f"Detected Music content for file: {path}/{name}")
                 elif ext == "fbx":
                     content.append(self.Content.ASSETS)
-                    logging.debug(f"Detected Assets content for file: {path}/{name}")                    
-                elif ext == "json":
+                    logging.debug(f"Detected Assets content for file: {path}/{name}")
+                elif ext in ["xml", "txt"] and ("moduledata" in path_lower or "configs" in path_lower):
                     content.append(self.Content.CONFIG)
                     logging.debug(f"Detected Configs content for file: {path}/{name}")
                 elif ext == "xscene" and name.startswith("scene"):
@@ -180,20 +182,24 @@ class BannerlordModDataContent(mobase.ModDataContent):
 
         filetree.walk(walk_content, "/")
         logging.info(f"Detected content types for mod: {content}")
-        return content
+        return content     
+        
+        
+        
+
 
 class MountAndBladeIIGame(BasicGame):
     Name = "Mount & Blade II: Bannerlord"
     Author = "d&h"
-    Version = "0.1.19"
-    Description = "Adds support for Mount & Blade II: Bannerlord with enhanced mod detection, save metadata display, and content indicators"
+    Version = "0.1.20"
+    Description = "Adds support for Mount & Blade II: Bannerlord"
 
     GameName = "Mount & Blade II: Bannerlord"
     GameShortName = "mountandblade2bannerlord"
     GameDataPath = "Modules"
     GameSupportURL = (
         r"https://github.com/ModOrganizer2/modorganizer-basic_games/wiki/"
-        "Game:-Mount-and-Blade-II:-Bannerlord"
+        "Game:-Mount-&-Blade-II:-Bannerlord"
     )
 
     GameBinary = "bin/Win64_Shipping_Client/TaleWorlds.MountAndBlade.Launcher.exe"
@@ -219,7 +225,7 @@ class MountAndBladeIIGame(BasicGame):
         except Exception as e:
             logging.error(f"MountAndBladeIIGame: Initialization failed - {str(e)}")
             return False
-
+        
     def savesDirectory(self) -> QDir:
         logging.debug("Accessing savesDirectory")
         try:
@@ -252,10 +258,15 @@ class MountAndBladeIIGame(BasicGame):
         for save in saves:
             logging.debug(f"Found save: {save.getName()}")
         logging.info(f"Found {len(saves)} save files")
-        return saves
+        return saves  
+
 
     def iniFiles(self):
         return ["engine_config.txt", "BannerlordConfig.txt", "LauncherData.xml"]
+
+        
+        
+        
 
     def executables(self):
         return [
