@@ -9,6 +9,8 @@ from ..basic_features import BasicGameSaveGameInfo
 from ..basic_features.basic_save_game_info import BasicGameSaveGame, format_date
 import logging
 from collections.abc import Mapping
+from enum import IntEnum
+
 
 class BannerlordSaveGame(BasicGameSaveGame):
     def __init__(self, filepath: Path):
@@ -25,7 +27,6 @@ class BannerlordSaveGame(BasicGameSaveGame):
                     logging.error(f"No JSON section found in {filepath}")
                     return {}
                 
-                # Extract JSON by counting braces
                 brace_count = 0
                 end = start
                 in_string = False
@@ -70,7 +71,6 @@ class BannerlordSaveGame(BasicGameSaveGame):
 def getMetadata(savepath: Path, save: mobase.ISaveGame) -> Mapping[str, str]:
     """Provide metadata for MO2 Saves tab tooltips."""
     assert isinstance(save, BannerlordSaveGame)
-    # Calculate file size in human-readable format
     file_size_bytes = Path(savepath).stat().st_size
     if file_size_bytes >= 1024 * 1024:
         file_size = f"{file_size_bytes / (1024 * 1024):.2f} MB"
@@ -116,11 +116,77 @@ class MountAndBladeIIModDataChecker(mobase.ModDataChecker):
         logging.debug("No valid mod structure detected")
         return mobase.ModDataChecker.INVALID
 
+class BannerlordModDataContent(mobase.ModDataContent):
+    class Content(IntEnum):
+        TEXTURE = 0
+        DLL = 1
+        CONFIG = 2
+        SCENE = 3
+        ASSETS = 4
+        MUSIC = 5
+
+    def getAllContents(self) -> list[mobase.ModDataContent.Content]:
+        return [
+            mobase.ModDataContent.Content(
+                self.Content.TEXTURE, "Textures", ":/MO/gui/content/texture"
+            ),
+            mobase.ModDataContent.Content(
+                self.Content.DLL, "DLLs", ":/MO/gui/content/script"
+            ),
+            mobase.ModDataContent.Content(
+                self.Content.CONFIG, "Configs", ":/MO/gui/content/inifile"
+            ),
+            mobase.ModDataContent.Content(
+                self.Content.SCENE, "Scenes", ":/MO/gui/content/geometries"
+            ),
+            mobase.ModDataContent.Content(
+                self.Content.ASSETS, "Assets", ":/MO/gui/content/mesh"
+            ),
+            mobase.ModDataContent.Content(
+                self.Content.MUSIC, "Music", ":/MO/gui/content/sound"
+            ),
+        ]
+
+    def getContentsFor(self, filetree: mobase.IFileTree) -> list[int]:
+        content = []
+        def walk_content(path: str, entry: mobase.FileTreeEntry) -> mobase.IFileTree.WalkReturn:
+            name = entry.name().lower()
+            path_lower = path.lower()
+            if entry.isDir():
+                if name in ["assetpackages", "dsassetpackages", "emassetpackages", "assetsources", "assets"]:
+                    content.append(self.Content.TEXTURE)
+                    logging.debug(f"Detected Textures content for folder: {path}/{name}")
+            elif entry.isFile():
+                ext = entry.suffix().lower()
+                if ext == ["tpac", "png", "dds"]:
+                    content.append(self.Content.TEXTURE)
+                    logging.debug(f"Detected Textures content for file: {path}/{name}")
+                elif ext == "dll":
+                    content.append(self.Content.DLL)
+                    logging.debug(f"Detected DLL content for file: {path}/{name}")
+                elif ext == "ogg":
+                    content.append(self.Content.MUSIC)
+                    logging.debug(f"Detected Music content for file: {path}/{name}")
+                elif ext == "fbx":
+                    content.append(self.Content.ASSETS)
+                    logging.debug(f"Detected Assets content for file: {path}/{name}")                    
+                elif ext == "json":
+                    content.append(self.Content.CONFIG)
+                    logging.debug(f"Detected Configs content for file: {path}/{name}")
+                elif ext == "xscene" and name.startswith("scene"):
+                    content.append(self.Content.SCENE)
+                    logging.debug(f"Detected Scenes content for file: {path}/{name}")
+            return mobase.IFileTree.WalkReturn.CONTINUE
+
+        filetree.walk(walk_content, "/")
+        logging.info(f"Detected content types for mod: {content}")
+        return content
+
 class MountAndBladeIIGame(BasicGame):
     Name = "Mount & Blade II: Bannerlord"
     Author = "d&h"
-    Version = "0.1.17"
-    Description = "Adds support for Mount & Blade II: Bannerlord with enhanced mod detection and save metadata display"
+    Version = "0.1.19"
+    Description = "Adds support for Mount & Blade II: Bannerlord with enhanced mod detection, save metadata display, and content indicators"
 
     GameName = "Mount & Blade II: Bannerlord"
     GameShortName = "mountandblade2bannerlord"
@@ -138,6 +204,7 @@ class MountAndBladeIIGame(BasicGame):
 
     GameNexusId = 3174
     GameSteamId = 261550
+    GameGogId = 1564781494
 
     def init(self, organizer: mobase.IOrganizer):
         logging.info("Initializing MountAndBladeIIGame")
@@ -145,6 +212,7 @@ class MountAndBladeIIGame(BasicGame):
             super().__init__()
             self._organizer = organizer
             self._register_feature(MountAndBladeIIModDataChecker())
+            self._register_feature(BannerlordModDataContent())
             self._register_feature(BasicGameSaveGameInfo(get_metadata=getMetadata, max_width=400))
             logging.info("MountAndBladeIIGame: Initialization complete")
             return True
