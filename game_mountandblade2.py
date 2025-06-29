@@ -139,7 +139,7 @@ class BannerlordModDataContent(mobase.ModDataContent):
                 self.Content.CONFIG, "Configs", ":/MO/gui/content/inifile"
             ),
             mobase.ModDataContent.Content(
-                self.Content.SCENE, "Scenes", ":/MO/gui/content/mesh"
+                self.Content.SCENE, "Scenes", ":/MO/gui/content/geometries"
             ),
             mobase.ModDataContent.Content(
                 self.Content.ASSETS, "Assets", ":/MO/gui/content/mesh"
