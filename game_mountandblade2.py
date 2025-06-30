@@ -211,6 +211,7 @@ class MountAndBladeIIGame(BasicGame):
     GameNexusId = 3174
     GameSteamId = 261550
     GameGogId = 1564781494
+    GameEpicId = "Chickadee"
 
     def init(self, organizer: mobase.IOrganizer):
         logging.info("Initializing MountAndBladeIIGame")
