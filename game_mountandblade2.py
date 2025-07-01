@@ -7,6 +7,7 @@ from PyQt6.QtCore import QFileInfo, QDir, QStandardPaths
 from ..basic_game import BasicGame
 from ..basic_features import BasicGameSaveGameInfo
 from ..basic_features.basic_save_game_info import BasicGameSaveGame, format_date
+from ..basic_features import BasicLocalSavegames
 import logging
 from collections.abc import Mapping
 from enum import IntEnum
@@ -198,6 +199,7 @@ class MountAndBladeIIGame(BasicGame):
             self._register_feature(MountAndBladeIIModDataChecker())
             self._register_feature(BannerlordModDataContent())
             self._register_feature(BasicGameSaveGameInfo(get_metadata=getMetadata, max_width=400))
+            self._register_feature(BasicLocalSavegames(self.savesDirectory()))
             logging.info("MountAndBladeIIGame: Initialization complete")
             return True
         except Exception as e:
