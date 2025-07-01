@@ -47,7 +47,6 @@ class BannerlordSaveGame(BasicGameSaveGame):
                     return {}
                 
                 json_str = data[start:end].decode('utf-8', errors='replace')
-                logging.debug(f"Extracted JSON from {filepath}: {json_str[:1000]}...")
                 metadata = json.loads(json_str)
                 return metadata.get("List", {})
         except Exception as e:
@@ -85,10 +84,7 @@ def getMetadata(savepath: Path, save: mobase.ISaveGame) -> Mapping[str, str]:
         "Saved at": format_date(save.getCreationTime()),
         "File Size": file_size,
     }
-    
-    
-    
-    
+
 class MountAndBladeIIModDataChecker(mobase.ModDataChecker):
     _valid_folders: list[str] = [
         "native",
@@ -112,11 +108,7 @@ class MountAndBladeIIModDataChecker(mobase.ModDataChecker):
                     return mobase.ModDataChecker.VALID
                 if e.exists("SubModule.xml", mobase.IFileTree.FILE):  # type: ignore
                     return mobase.ModDataChecker.VALID
-
         return mobase.ModDataChecker.INVALID
-        
-        
-
 
 class BannerlordModDataContent(mobase.ModDataContent):
     class Content(IntEnum):
@@ -150,48 +142,33 @@ class BannerlordModDataContent(mobase.ModDataContent):
         ]
 
     def getContentsFor(self, filetree: mobase.IFileTree) -> list[int]:
+        """Identify content types (e.g., textures, DLLs) in the mod file tree."""
         content = []
+        extension_map = {
+            "tpac": self.Content.TEXTURE,
+            "png": self.Content.TEXTURE,
+            "dds": self.Content.TEXTURE,
+            "dll": self.Content.DLL,
+            "ogg": self.Content.MUSIC,
+            "fbx": self.Content.ASSETS,
+            "json": self.Content.CONFIG,
+            "xscene": self.Content.SCENE,
+        }
         def walk_content(path: str, entry: mobase.FileTreeEntry) -> mobase.IFileTree.WalkReturn:
-            name = entry.name().lower()
-            path_lower = path.lower()
-            if entry.isDir():
-                if name in ["assetpackages", "dsassetpackages", "emassetpackages", "assetsources", "assets"]:
-                    content.append(self.Content.TEXTURE)
-                    logging.debug(f"Detected Textures content for folder: {path}/{name}")
-            elif entry.isFile():
+            if entry.isFile():
                 ext = entry.suffix().lower()
-                if ext in ["tpac", "png", "dds"]:
-                    content.append(self.Content.TEXTURE)
-                    logging.debug(f"Detected Textures content for file: {path}/{name}")
-                elif ext == "dll":
-                    content.append(self.Content.DLL)
-                    logging.debug(f"Detected DLL content for file: {path}/{name}")
-                elif ext == "ogg":
-                    content.append(self.Content.MUSIC)
-                    logging.debug(f"Detected Music content for file: {path}/{name}")
-                elif ext == "fbx":
-                    content.append(self.Content.ASSETS)
-                    logging.debug(f"Detected Assets content for file: {path}/{name}")
-                elif ext in ["xml", "txt"] and ("moduledata" in path_lower or "configs" in path_lower):
-                    content.append(self.Content.CONFIG)
-                    logging.debug(f"Detected Configs content for file: {path}/{name}")
-                elif ext == "xscene" and name.startswith("scene"):
-                    content.append(self.Content.SCENE)
-                    logging.debug(f"Detected Scenes content for file: {path}/{name}")
+                if ext in extension_map:
+                    content.append(extension_map[ext])
             return mobase.IFileTree.WalkReturn.CONTINUE
 
         filetree.walk(walk_content, "/")
-        logging.info(f"Detected content types for mod: {content}")
-        return content     
-        
-        
-        
-
+        logging.debug(f"Detected content types for mod: {content}")
+        return content
 
 class MountAndBladeIIGame(BasicGame):
     Name = "Mount & Blade II: Bannerlord"
     Author = "d&h"
-    Version = "0.1.20"
+    Version = "0.1.21"
     Description = "Adds support for Mount & Blade II: Bannerlord"
 
     GameName = "Mount & Blade II: Bannerlord"
@@ -214,7 +191,7 @@ class MountAndBladeIIGame(BasicGame):
     GameEpicId = "Chickadee"
 
     def init(self, organizer: mobase.IOrganizer):
-        logging.info("Initializing MountAndBladeIIGame")
+        """Initialize the Mount & Blade II: Bannerlord game plugin."""
         try:
             super().__init__()
             self._organizer = organizer
@@ -226,48 +203,48 @@ class MountAndBladeIIGame(BasicGame):
         except Exception as e:
             logging.error(f"MountAndBladeIIGame: Initialization failed - {str(e)}")
             return False
-        
+
     def savesDirectory(self) -> QDir:
-        logging.debug("Accessing savesDirectory")
+        """Return the directory containing Bannerlord save files."""
         try:
             docs_path = QStandardPaths.writableLocation(QStandardPaths.StandardLocation.DocumentsLocation)
             save_path = os.path.join(docs_path, "Mount and Blade II Bannerlord", "Game Saves")
-            logging.debug(f"savesDirectory: Resolved path: {save_path}")
             if os.path.isdir(save_path):
                 logging.info(f"savesDirectory: Valid path: {save_path}")
                 return QDir(save_path)
-            else:
-                logging.warning(f"savesDirectory: Invalid path: {save_path}, falling back to hardcoded")
-                fallback_path = os.path.expanduser("~/Documents/Mount and Blade II Bannerlord/Game Saves")
-                if os.path.isdir(fallback_path):
-                    logging.info(f"savesDirectory: Hardcoded path valid: {fallback_path}")
-                    return QDir(fallback_path)
-                else:
-                    logging.error(f"savesDirectory: Hardcoded path invalid: {fallback_path}")
-                    return QDir()
+            logging.warning(f"savesDirectory: Invalid path: {save_path}, falling back to hardcoded")
+            fallback_path = os.path.expanduser("~/Documents/Mount and Blade II Bannerlord/Game Saves")
+            if os.path.isdir(fallback_path):
+                logging.info(f"savesDirectory: Hardcoded path valid: {fallback_path}")
+                return QDir(fallback_path)
+            logging.error(f"savesDirectory: Hardcoded path invalid: {fallback_path}")
+            return QDir()
         except Exception as e:
             logging.error(f"savesDirectory: Failed - {str(e)}")
             return QDir()
 
     def listSaves(self, folder: QDir) -> list[mobase.ISaveGame]:
-        logging.debug(f"Listing saves in: {folder.absolutePath()}")
-        ext = self._mappings.savegameExtension.get()
-        saves = [
-            BannerlordSaveGame(path)
-            for path in Path(folder.absolutePath()).glob(f"*.{ext}")
-        ]
-        for save in saves:
-            logging.debug(f"Found save: {save.getName()}")
-        logging.info(f"Found {len(saves)} save files")
-        return saves  
-
+        """List all Bannerlord save files in the specified directory."""
+        try:
+            ext = self._mappings.savegameExtension.get()
+            saves = []
+            skipped_files = []
+            for path in Path(folder.absolutePath()).glob(f"*.{ext}"):
+                try:
+                    save = BannerlordSaveGame(path)
+                    saves.append(save)
+                except Exception as e:
+                    skipped_files.append(str(path))
+            if skipped_files:
+                logging.debug(f"Skipped {len(skipped_files)} invalid save files in {folder.absolutePath()}")
+            logging.debug(f"Found {len(saves)} save files in {folder.absolutePath()}")
+            return saves
+        except Exception as e:
+            logging.error(f"Failed to list saves in {folder.absolutePath()}: {str(e)}")
+            return []
 
     def iniFiles(self):
         return ["engine_config.txt", "BannerlordConfig.txt", "LauncherData.xml"]
-
-        
-        
-        
 
     def executables(self):
         return [
