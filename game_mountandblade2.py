@@ -5,9 +5,8 @@ from pathlib import Path
 import xml.etree.ElementTree as ET
 from PyQt6.QtCore import QFileInfo, QDir, QStandardPaths
 from ..basic_game import BasicGame
-from ..basic_features import BasicGameSaveGameInfo
+from ..basic_features import BasicGameSaveGameInfo, BasicLocalSavegames
 from ..basic_features.basic_save_game_info import BasicGameSaveGame, format_date
-from ..basic_features import BasicLocalSavegames
 import logging
 from collections.abc import Mapping
 from enum import IntEnum
@@ -85,7 +84,13 @@ def getMetadata(savepath: Path, save: mobase.ISaveGame) -> Mapping[str, str]:
         "Saved at": format_date(save.getCreationTime()),
         "File Size": file_size,
     }
-
+def get_preview(savepath: Path) -> str | None:
+    """Return the path to a preview image for the save file, if it exists."""
+    for ext in (".png", ".jpg"):
+        preview_path = savepath.with_suffix(ext)
+        if preview_path.exists():
+            return str(preview_path)
+    return None
 class MountAndBladeIIModDataChecker(mobase.ModDataChecker):
     _valid_folders: list[str] = [
         "native",
@@ -113,17 +118,18 @@ class MountAndBladeIIModDataChecker(mobase.ModDataChecker):
 
 class BannerlordModDataContent(mobase.ModDataContent):
     class Content(IntEnum):
-        TEXTURE = 0
+        ASSET_PACK = 0
         DLL = 1
         CONFIG = 2
         SCENE = 3
         ASSETS = 4
         MUSIC = 5
+        CUSTOM_MAP = 6
 
     def getAllContents(self) -> list[mobase.ModDataContent.Content]:
         return [
             mobase.ModDataContent.Content(
-                self.Content.TEXTURE, "Textures", ":/MO/gui/content/texture"
+                self.Content.ASSET_PACK, "Asset Packs", ":/MO/gui/content/bsa"
             ),
             mobase.ModDataContent.Content(
                 self.Content.DLL, "DLLs", ":/MO/gui/content/script"
@@ -138,7 +144,10 @@ class BannerlordModDataContent(mobase.ModDataContent):
                 self.Content.ASSETS, "Assets", ":/MO/gui/content/mesh"
             ),
             mobase.ModDataContent.Content(
-                self.Content.MUSIC, "Music", ":/MO/gui/content/sound"
+                self.Content.MUSIC, "Music", ":/MO/gui/content/music"
+            ),
+            mobase.ModDataContent.Content(
+                self.Content.CUSTOM_MAP, "World Map", ":/MO/gui/content/texture"
             ),
         ]
 
@@ -146,17 +155,21 @@ class BannerlordModDataContent(mobase.ModDataContent):
         """Identify content types (e.g., textures, DLLs) in the mod file tree."""
         content = []
         extension_map = {
-            "tpac": self.Content.TEXTURE,
-            "png": self.Content.TEXTURE,
-            "dds": self.Content.TEXTURE,
+            "tpac": self.Content.ASSET_PACK,
             "dll": self.Content.DLL,
             "ogg": self.Content.MUSIC,
             "fbx": self.Content.ASSETS,
+            "png": self.Content.ASSETS,
+            "dds": self.Content.ASSETS,
             "json": self.Content.CONFIG,
             "xscene": self.Content.SCENE,
         }
         def walk_content(path: str, entry: mobase.FileTreeEntry) -> mobase.IFileTree.WalkReturn:
             if entry.isFile():
+                # Check for specific file settlements_distance_cache.bin
+                if entry.name().lower() == "settlements_distance_cache.bin":
+                    content.append(self.Content.CUSTOM_MAP)
+                # Check for other file types by extension
                 ext = entry.suffix().lower()
                 if ext in extension_map:
                     content.append(extension_map[ext])
@@ -198,7 +211,7 @@ class MountAndBladeIIGame(BasicGame):
             self._organizer = organizer
             self._register_feature(MountAndBladeIIModDataChecker())
             self._register_feature(BannerlordModDataContent())
-            self._register_feature(BasicGameSaveGameInfo(get_metadata=getMetadata, max_width=400))
+            self._register_feature(BasicGameSaveGameInfo(get_metadata=getMetadata, get_preview=get_preview, max_width=400))
             self._register_feature(BasicLocalSavegames(self.savesDirectory()))
             logging.info("MountAndBladeIIGame: Initialization complete")
             return True
