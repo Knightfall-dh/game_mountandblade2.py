@@ -1,15 +1,27 @@
-import mobase
+import sys
 import os
 import json
 from pathlib import Path
 import xml.etree.ElementTree as ET
-from PyQt6.QtCore import QFileInfo, QDir, QStandardPaths
-from ..basic_game import BasicGame
-from ..basic_features import BasicGameSaveGameInfo, BasicLocalSavegames
-from ..basic_features.basic_save_game_info import BasicGameSaveGame, format_date
+from PyQt6.QtCore import QDir, QFileInfo, QStandardPaths, Qt
+from PyQt6.QtWidgets import QMainWindow, QTabWidget, QWidget
+import mobase
 import logging
 from collections.abc import Mapping
 from enum import IntEnum
+
+from ..basic_game import BasicGame
+from ..basic_features import BasicLocalSavegames, BasicGameSaveGameInfo
+from ..basic_features.basic_save_game_info import BasicGameSaveGame, format_date
+from .mountandblade2.submodule_tab import SubModuleTabWidget
+
+# Ensure games directory is in sys.path
+games_dir = Path(__file__).parent
+if str(games_dir) not in sys.path:
+    sys.path.append(str(games_dir))
+    logging.info(f"Added {games_dir} to sys.path")
+
+logging.info("MountAndBladeIIGame: Loading plugin")
 
 class BannerlordSaveGame(BasicGameSaveGame):
     def __init__(self, filepath: Path):
@@ -17,7 +29,6 @@ class BannerlordSaveGame(BasicGameSaveGame):
         self._metadata = self._parse_metadata(filepath)
 
     def _parse_metadata(self, filepath: Path) -> dict:
-        """Parse JSON metadata from .sav file using brace counting."""
         try:
             with open(filepath, 'rb') as f:
                 data = f.read()
@@ -54,7 +65,6 @@ class BannerlordSaveGame(BasicGameSaveGame):
             return {}
 
     def getName(self) -> str:
-        """Return character name for Name column."""
         return self._metadata.get("CharacterName", "Unknown")
 
     def getCharacterName(self) -> str:
@@ -67,7 +77,6 @@ class BannerlordSaveGame(BasicGameSaveGame):
         return self._metadata.get("MainHeroGold", "Unknown")
 
 def getMetadata(savepath: Path, save: mobase.ISaveGame) -> Mapping[str, str]:
-    """Provide metadata for MO2 Saves tab tooltips."""
     assert isinstance(save, BannerlordSaveGame)
     file_size_bytes = Path(savepath).stat().st_size
     if file_size_bytes >= 1024 * 1024:
@@ -84,13 +93,14 @@ def getMetadata(savepath: Path, save: mobase.ISaveGame) -> Mapping[str, str]:
         "Saved at": format_date(save.getCreationTime()),
         "File Size": file_size,
     }
+
 def get_preview(savepath: Path) -> str | None:
-    """Return the path to a preview image for the save file, if it exists."""
     for ext in (".png", ".jpg"):
         preview_path = savepath.with_suffix(ext)
         if preview_path.exists():
             return str(preview_path)
     return None
+
 class MountAndBladeIIModDataChecker(mobase.ModDataChecker):
     _valid_folders: list[str] = [
         "native",
@@ -102,17 +112,12 @@ class MountAndBladeIIModDataChecker(mobase.ModDataChecker):
         "multiplayer",
     ]
 
-    def __init__(self):
-        super().__init__()
-
-    def dataLooksValid(
-        self, filetree: mobase.IFileTree
-    ) -> mobase.ModDataChecker.CheckReturn:
+    def dataLooksValid(self, filetree: mobase.IFileTree) -> mobase.ModDataChecker.CheckReturn:
         for e in filetree:
             if e.isDir():
                 if e.name().lower() in self._valid_folders:
                     return mobase.ModDataChecker.VALID
-                if e.exists("SubModule.xml", mobase.IFileTree.FILE):  # type: ignore
+                if e.exists("SubModule.xml", mobase.IFileTree.FILE):
                     return mobase.ModDataChecker.VALID
         return mobase.ModDataChecker.INVALID
 
@@ -128,31 +133,16 @@ class BannerlordModDataContent(mobase.ModDataContent):
 
     def getAllContents(self) -> list[mobase.ModDataContent.Content]:
         return [
-            mobase.ModDataContent.Content(
-                self.Content.ASSET_PACK, "Asset Packs", ":/MO/gui/content/bsa"
-            ),
-            mobase.ModDataContent.Content(
-                self.Content.DLL, "DLLs", ":/MO/gui/content/script"
-            ),
-            mobase.ModDataContent.Content(
-                self.Content.CONFIG, "Configs", ":/MO/gui/content/inifile"
-            ),
-            mobase.ModDataContent.Content(
-                self.Content.SCENE, "Scenes", ":/MO/gui/content/geometries"
-            ),
-            mobase.ModDataContent.Content(
-                self.Content.ASSETS, "Assets", ":/MO/gui/content/mesh"
-            ),
-            mobase.ModDataContent.Content(
-                self.Content.MUSIC, "Music", ":/MO/gui/content/music"
-            ),
-            mobase.ModDataContent.Content(
-                self.Content.CUSTOM_MAP, "World Map", ":/MO/gui/content/texture"
-            ),
+            mobase.ModDataContent.Content(self.Content.ASSET_PACK, "Asset Packs", ":/MO/gui/content/bsa"),
+            mobase.ModDataContent.Content(self.Content.DLL, "DLLs", ":/MO/gui/content/script"),
+            mobase.ModDataContent.Content(self.Content.CONFIG, "Configs", ":/MO/gui/content/inifile"),
+            mobase.ModDataContent.Content(self.Content.SCENE, "Scenes", ":/MO/gui/content/geometries"),
+            mobase.ModDataContent.Content(self.Content.ASSETS, "Assets", ":/MO/gui/content/mesh"),
+            mobase.ModDataContent.Content(self.Content.MUSIC, "Music", ":/MO/gui/content/music"),
+            mobase.ModDataContent.Content(self.Content.CUSTOM_MAP, "World Map", ":/MO/gui/content/texture"),
         ]
 
     def getContentsFor(self, filetree: mobase.IFileTree) -> list[int]:
-        """Identify content types (e.g., textures, DLLs) in the mod file tree."""
         content = []
         extension_map = {
             "tpac": self.Content.ASSET_PACK,
@@ -166,10 +156,8 @@ class BannerlordModDataContent(mobase.ModDataContent):
         }
         def walk_content(path: str, entry: mobase.FileTreeEntry) -> mobase.IFileTree.WalkReturn:
             if entry.isFile():
-                # Check for specific file settlements_distance_cache.bin
                 if entry.name().lower() == "settlements_distance_cache.bin":
                     content.append(self.Content.CUSTOM_MAP)
-                # Check for other file types by extension
                 ext = entry.suffix().lower()
                 if ext in extension_map:
                     content.append(extension_map[ext])
@@ -194,7 +182,6 @@ class MountAndBladeIIGame(BasicGame):
     )
 
     GameBinary = "bin/Win64_Shipping_Client/TaleWorlds.MountAndBlade.Launcher.exe"
-
     GameDocumentsDirectory = "%DOCUMENTS%/Mount and Blade II Bannerlord/Configs"
     GameSaveExtension = "sav"
     GameSavesDirectory = "%DOCUMENTS%/Mount and Blade II Bannerlord/Game Saves"
@@ -205,22 +192,50 @@ class MountAndBladeIIGame(BasicGame):
     GameEpicId = "Chickadee"
 
     def init(self, organizer: mobase.IOrganizer):
-        """Initialize the Mount & Blade II: Bannerlord game plugin."""
         try:
+            logging.info("MountAndBladeIIGame: Starting init")
             super().__init__()
             self._organizer = organizer
             self._register_feature(MountAndBladeIIModDataChecker())
             self._register_feature(BannerlordModDataContent())
             self._register_feature(BasicGameSaveGameInfo(get_metadata=getMetadata, get_preview=get_preview, max_width=400))
             self._register_feature(BasicLocalSavegames(self.savesDirectory()))
+            try:
+                logging.info("MountAndBladeIIGame: Registering UI callback")
+                organizer.onUserInterfaceInitialized(self.init_tab)
+            except Exception as e:
+                logging.error(f"MountAndBladeIIGame: Failed to register UI callback: {str(e)}")
             logging.info("MountAndBladeIIGame: Initialization complete")
             return True
         except Exception as e:
-            logging.error(f"MountAndBladeIIGame: Initialization failed - {str(e)}")
+            logging.error(f"MountAndBladeIIGame: Initialization failed: {str(e)}")
             return False
 
+    def init_tab(self, main_window: QMainWindow):
+        try:
+            logging.info("MountAndBladeIIGame: Initializing SubModules tab")
+            if self._organizer.managedGame() != self:
+                logging.info("MountAndBladeIIGame: Not the managed game, skipping tab initialization")
+                return
+            self._main_window = main_window
+            tab_widget = main_window.findChild(QTabWidget, "tabWidget")
+            if not tab_widget:
+                logging.warning("MountAndBladeIIGame: No QTabWidget named 'tabWidget' found")
+                return
+            if not tab_widget.findChild(QWidget, "espTab"):
+                logging.warning("MountAndBladeIIGame: No 'espTab' found in tabWidget")
+                return
+            self._submodule_tab = SubModuleTabWidget(main_window, self._organizer)
+            plugin_tab = tab_widget.findChild(QWidget, "espTab")
+            tab_index = tab_widget.indexOf(plugin_tab) + 1
+            if not tab_widget.isTabVisible(tab_index):
+                tab_index += 1
+            tab_widget.insertTab(tab_index, self._submodule_tab, "SubModules")
+            logging.info(f"MountAndBladeIIGame: SubModules tab inserted at index {tab_index}")
+        except Exception as e:
+            logging.error(f"MountAndBladeIIGame: Failed to initialize SubModules tab: {str(e)}")
+
     def savesDirectory(self) -> QDir:
-        """Return the directory containing Bannerlord save files."""
         try:
             docs_path = QStandardPaths.writableLocation(QStandardPaths.StandardLocation.DocumentsLocation)
             save_path = os.path.join(docs_path, "Mount and Blade II Bannerlord", "Game Saves")
@@ -235,11 +250,10 @@ class MountAndBladeIIGame(BasicGame):
             logging.error(f"savesDirectory: Hardcoded path invalid: {fallback_path}")
             return QDir()
         except Exception as e:
-            logging.error(f"savesDirectory: Failed - {str(e)}")
+            logging.error(f"savesDirectory: Failed: {str(e)}")
             return QDir()
 
     def listSaves(self, folder: QDir) -> list[mobase.ISaveGame]:
-        """List all Bannerlord save files in the specified directory."""
         try:
             ext = self._mappings.savegameExtension.get()
             saves = []
@@ -258,37 +272,29 @@ class MountAndBladeIIGame(BasicGame):
             logging.error(f"Failed to list saves in {folder.absolutePath()}: {str(e)}")
             return []
 
-    def iniFiles(self):
+    def iniFiles(self) -> list[str]:
         return ["engine_config.txt", "BannerlordConfig.txt", "LauncherData.xml"]
 
-    def executables(self):
-        return [
-            mobase.ExecutableInfo(
-                "Mount & Blade II: Bannerlord (Launcher)",
-                QFileInfo(
-                    self.gameDirectory(),
-                    "bin/Win64_Shipping_Client/TaleWorlds.MountAndBlade.Launcher.exe",
+    def executables(self) -> list[mobase.ExecutableInfo]:
+        try:
+            return [
+                mobase.ExecutableInfo(
+                    "Mount & Blade II: Bannerlord (Launcher)",
+                    QFileInfo(self.gameDirectory(), "bin/Win64_Shipping_Client/TaleWorlds.MountAndBlade.Launcher.exe"),
                 ),
-            ),
-            mobase.ExecutableInfo(
-                "Mount & Blade II: Bannerlord",
-                QFileInfo(
-                    self.gameDirectory(),
-                    "bin/Win64_Shipping_Client/Bannerlord.exe",
+                mobase.ExecutableInfo(
+                    "Mount & Blade II: Bannerlord",
+                    QFileInfo(self.gameDirectory(), "bin/Win64_Shipping_Client/Bannerlord.exe"),
                 ),
-            ),
-            mobase.ExecutableInfo(
-                "Mount & Blade II: Bannerlord (Native)",
-                QFileInfo(
-                    self.gameDirectory(),
-                    "bin/Win64_Shipping_Client/Bannerlord.Native.exe",
+                mobase.ExecutableInfo(
+                    "Mount & Blade II: Bannerlord (Native)",
+                    QFileInfo(self.gameDirectory(), "bin/Win64_Shipping_Client/Bannerlord.Native.exe"),
                 ),
-            ),
-            mobase.ExecutableInfo(
-                "Mount & Blade II: Bannerlord (Singleplayer)",
-                QFileInfo(
-                    self.gameDirectory(),
-                    "bin/Win64_Shipping_Client/TaleWorlds.MountAndBlade.Launcher.Singleplayer.exe",
+                mobase.ExecutableInfo(
+                    "Mount & Blade II: Bannerlord (Singleplayer)",
+                    QFileInfo(self.gameDirectory(), "bin/Win64_Shipping_Client/TaleWorlds.MountAndBlade.Launcher.Singleplayer.exe"),
                 ),
-            ),
-        ]
+            ]
+        except Exception as e:
+            logging.error(f"Failed to generate executables: {str(e)}")
+            return []
