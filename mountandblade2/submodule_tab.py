@@ -4,11 +4,12 @@ from datetime import datetime
 from pathlib import Path
 import xml.etree.ElementTree as ET
 from PyQt6.QtCore import QDir, QStandardPaths, Qt, QTimer
-from PyQt6.QtWidgets import QWidget, QVBoxLayout, QListWidget, QPushButton, QHBoxLayout, QAbstractItemView, QListWidgetItem
+from PyQt6.QtWidgets import QWidget, QVBoxLayout, QListWidget, QPushButton, QHBoxLayout, QAbstractItemView, QListWidgetItem, QMessageBox
 import mobase
 import logging
 from time import time
 import re
+from typing import Dict, List, Tuple, Set
 
 logger = logging.getLogger(__name__)
 
@@ -48,6 +49,10 @@ class SubModuleTabWidget(QWidget):
         self._refresh_button = QPushButton("Refresh", self)
         self._refresh_button.clicked.connect(self.refresh_mods)
         button_layout.addWidget(self._refresh_button)
+        
+        self._sort_button = QPushButton("Sort Mods", self)
+        self._sort_button.clicked.connect(self.sort_mods)
+        button_layout.addWidget(self._sort_button)
         
         self._enable_all_button = QPushButton("Enable All", self)
         self._enable_all_button.clicked.connect(self.enable_all_mods)
@@ -398,6 +403,305 @@ class SubModuleTabWidget(QWidget):
         logger.warning(f"SubModuleTabWidget: Invalid version format '{version_text}' for mod {mod_id or 'unknown'}, defaulting to v1.0.0.0")
         return "v1.0.0.0"
 
+    def _build_dependency_graph(self, mod_data: List[Dict]) -> Tuple[Dict[str, List[Tuple[str, str, bool, str]]], List[str]]:
+        """Build a dependency graph from SubModule.xml files and detect issues."""
+        dependencies = {}
+        issues = []
+        for mod in mod_data:
+            mod_id = mod["id"]
+            dependencies[mod_id] = []
+            xml_path = mod["source_path"]
+            try:
+                tree = ET.parse(xml_path)
+                root = tree.getroot()
+                for dep in root.findall(".//DependedModuleMetadata"):
+                    dep_id = dep.get("id")
+                    order = dep.get("order", "LoadAfterThis")
+                    optional = dep.get("optional", "false").lower() == "true"
+                    incompatible = dep.get("incompatible", "false").lower() == "true"
+                    version = dep.get("version", "*")
+                    if dep_id:
+                        if incompatible:
+                            if dep_id in [m["id"] for m in mod_data]:
+                                issues.append(f"Mod {mod_id} is incompatible with {dep_id}")
+                            continue
+                        dependencies[mod_id].append((dep_id, order, optional, version))
+            except ET.ParseError as e:
+                issues.append(f"Failed to parse SubModule.xml for {mod_id}: {str(e)}")
+        # Ensure PRIORITY_MODS load before native modules
+        for mod_id in self.PRIORITY_MODS:
+            if mod_id in dependencies:
+                for native_mod in self.DEFAULT_MOD_ORDER:
+                    if native_mod in [m["id"] for m in mod_data] and (native_mod, "LoadBeforeThis", False, "*") not in dependencies[mod_id]:
+                        dependencies[mod_id].append((native_mod, "LoadBeforeThis", False, "*"))
+                        logger.debug(f"SubModuleTabWidget: Enforced {mod_id} to load before {native_mod}")
+        return dependencies, issues
+
+    def _topological_sort(self, dependencies: Dict[str, List[Tuple[str, str, bool, str]]], mod_data: List[Dict], mod_id_to_data: Dict[str, Dict]) -> List[Dict]:
+        """Perform topological sort based on dependencies, enforcing PRIORITY_MODS and DEFAULT_MOD_ORDER."""
+        def dfs(mod_id: str, visited: Set[str], temp_mark: Set[str], result: List[str], dependencies: Dict[str, List[Tuple[str, str, bool, str]]]):
+            if mod_id in temp_mark:
+                raise ValueError(f"Circular dependency detected involving {mod_id}")
+            if mod_id not in visited:
+                temp_mark.add(mod_id)
+                for dep_id, order, optional, _ in dependencies.get(mod_id, []):
+                    if order == "LoadAfterThis" and dep_id in mod_id_to_data and not optional:
+                        dfs(dep_id, visited, temp_mark, result, dependencies)
+                    elif order == "LoadBeforeThis" and dep_id in mod_id_to_data and not optional:
+                        if dep_id not in visited:  # Only recurse if not visited to avoid infinite loops
+                            dfs(dep_id, visited, temp_mark, result, dependencies)
+                temp_mark.remove(mod_id)
+                visited.add(mod_id)
+                result.append(mod_id)
+        
+        visited = set()
+        temp_mark = set()
+        result = []
+        
+        # Process PRIORITY_MODS first
+        for mod_id in self.PRIORITY_MODS:
+            if mod_id in mod_id_to_data and mod_id not in visited:
+                dfs(mod_id, visited, temp_mark, result, dependencies)
+        
+        # Process DEFAULT_MOD_ORDER next
+        for mod_id in self.DEFAULT_MOD_ORDER:
+            if mod_id in mod_id_to_data and mod_id not in visited:
+                dfs(mod_id, visited, temp_mark, result, dependencies)
+        
+        # Process remaining mods
+        for mod in mod_data:
+            mod_id = mod["id"]
+            if mod_id not in visited:
+                dfs(mod_id, visited, temp_mark, result, dependencies)
+        
+        # Convert sorted mod IDs to mod_data entries
+        sorted_mods = []
+        for mod_id in result:
+            if mod_id in mod_id_to_data:
+                sorted_mods.append(mod_id_to_data[mod_id])
+        
+        return sorted_mods
+
+    def _map_modlist_to_submodules(self, enabled_mods: List[str], mod_data: List[Dict]) -> List[str]:
+        """Map MO2 modlist.txt order to submodule IDs, respecting upside-down priority."""
+        mod_id_to_mo2_name = {mod["id"]: mod.get("mo2_mod_name") for mod in mod_data if mod.get("mo2_mod_name")}
+        sorted_mod_ids = []
+        # Reverse enabled_mods to match MO2's priority (bottom = highest)
+        for mo2_mod_name in reversed(enabled_mods):
+            for mod_id, name in mod_id_to_mo2_name.items():
+                if name == mo2_mod_name and mod_id not in sorted_mod_ids:
+                    sorted_mod_ids.append(mod_id)
+        # Add PRIORITY_MODS and DEFAULT_MOD_ORDER at the start if not included
+        for mod_id in self.PRIORITY_MODS:
+            if mod_id in mod_id_to_mo2_name and mod_id not in sorted_mod_ids:
+                sorted_mod_ids.insert(0, mod_id)
+        for mod_id in self.DEFAULT_MOD_ORDER:
+            if mod_id not in sorted_mod_ids:
+                sorted_mod_ids.append(mod_id)
+        # Add any remaining mod IDs not in modlist.txt
+        for mod in mod_data:
+            mod_id = mod["id"]
+            if mod_id not in sorted_mod_ids:
+                sorted_mod_ids.append(mod_id)
+        return sorted_mod_ids
+
+    def sort_mods(self):
+        """Sort mods based on dependencies and modlist.txt, enforcing PRIORITY_MODS and native modules."""
+        try:
+            logger.info("SubModuleTabWidget: Starting sort_mods")
+            start_time = time()
+            
+            # Get enabled mods and paths
+            enabled_mods = self._get_enabled_mods()
+            mo2_mods_path = Path(self._organizer.modsPath())
+            modules_path = Path(self._organizer.managedGame().gameDirectory().absolutePath()) / "Modules"
+            enabled_mod_paths = {mo2_mod_name: mo2_mods_path / mo2_mod_name for mo2_mod_name in enabled_mods}
+            
+            # Collect mod data
+            mod_data = []
+            mod_id_to_data = {}
+            xml_cache = {}
+            
+            # Scan game Modules directory
+            if modules_path.exists():
+                for mod_dir in modules_path.iterdir():
+                    if mod_dir.is_dir():
+                        mod_id = mod_dir.name
+                        xml_path, _ = self._get_highest_priority_submodule_xml(mod_id, enabled_mods, enabled_mod_paths, modules_path)
+                        if xml_path and xml_path.exists() and xml_path not in xml_cache:
+                            try:
+                                tree = ET.parse(xml_path)
+                                root = tree.getroot()
+                                mod_id = root.find("Id").get("value").strip() if root.find("Id") is not None else mod_dir.name
+                                version_elem = root.find("Version")
+                                raw_version = version_elem.get("value").strip() if version_elem is not None and version_elem.get("value") else (version_elem.text.strip() if version_elem is not None and version_elem.text else "v1.0.0.0")
+                                mod_version = self._parse_version(raw_version, mod_id)
+                                multiplayer_elem = root.find("MultiplayerModule")
+                                is_multiplayer = multiplayer_elem is not None and multiplayer_elem.get("value").strip() == "true"
+                                category_elem = root.find("ModuleCategory")
+                                is_multiplayer |= category_elem is not None and category_elem.get("value").strip() == "Multiplayer"
+                                deps = [f"{dep.get('id')} ({dep.get('version', '*')})" for dep in root.findall(".//DependedModuleMetadata") if dep.get("id")]
+                                dep_text = ", ".join(deps) if deps else "None"
+                                xml_cache[xml_path] = {
+                                    "id": mod_id,
+                                    "raw_version": raw_version,
+                                    "version": mod_version,
+                                    "is_multiplayer": is_multiplayer,
+                                    "deps": dep_text,
+                                    "is_native": True,
+                                    "source_path": xml_path
+                                }
+                                mod_data.append(xml_cache[xml_path])
+                                mod_id_to_data[mod_id] = mod_data[-1]
+                            except ET.ParseError as e:
+                                logger.warning(f"SubModuleTabWidget: Failed to parse SubModule.xml in {xml_path}: {str(e)}")
+            
+            # Scan MO2 mods directory
+            if mo2_mods_path.exists():
+                for mo2_mod_name in enabled_mods:
+                    mod_path = enabled_mod_paths[mo2_mod_name]
+                    xml_files = list(mod_path.glob("**/SubModule.xml"))
+                    for xml_path in xml_files:
+                        if xml_path in xml_cache:
+                            continue
+                        try:
+                            xml_priority_path, xml_mo2_mod_name = self._get_highest_priority_submodule_xml(
+                                xml_path.parent.name, enabled_mods, enabled_mod_paths, modules_path)
+                            if xml_priority_path and xml_priority_path != xml_path:
+                                logger.debug(f"SubModuleTabWidget: Skipping {xml_path} as higher-priority file exists: {xml_priority_path}")
+                                continue
+                            tree = ET.parse(xml_path)
+                            root = tree.getroot()
+                            mod_id = root.find("Id").get("value").strip() if root.find("Id") is not None else xml_path.parent.name
+                            version_elem = root.find("Version")
+                            raw_version = version_elem.get("value").strip() if version_elem is not None and version_elem.get("value") else (version_elem.text.strip() if version_elem is not None and version_elem.text else "v1.0.0.0")
+                            mod_version = self._parse_version(raw_version, mod_id)
+                            multiplayer_elem = root.find("MultiplayerModule")
+                            is_multiplayer = multiplayer_elem is not None and multiplayer_elem.get("value").strip() == "true"
+                            category_elem = root.find("ModuleCategory")
+                            is_multiplayer |= category_elem is not None and category_elem.get("value").strip() == "Multiplayer"
+                            deps = [f"{dep.get('id')} ({dep.get('version', '*')})" for dep in root.findall(".//DependedModuleMetadata") if dep.get("id")]
+                            dep_text = ", ".join(deps) if deps else "None"
+                            xml_cache[xml_path] = {
+                                "name": mod_id,
+                                "id": mod_id,
+                                "raw_version": raw_version,
+                                "version": mod_version,
+                                "deps": dep_text,
+                                "is_native": False,
+                                "is_multiplayer": is_multiplayer,
+                                "mo2_mod_name": mo2_mod_name,
+                                "source_path": xml_path
+                            }
+                            mod_data.append(xml_cache[xml_path])
+                            mod_id_to_data[mod_id] = mod_data[-1]
+                        except ET.ParseError as e:
+                            logger.warning(f"SubModuleTabWidget: Failed to parse SubModule.xml in {xml_path}: {str(e)}")
+            
+            # Read saved states from LauncherData.xml
+            launcher_data_path = self._get_launcher_data_path()
+            saved_mod_states = {}
+            saved_mod_order = []
+            if launcher_data_path.exists():
+                try:
+                    tree = ET.parse(launcher_data_path)
+                    root = tree.getroot()
+                    mod_datas = root.find(".//SingleplayerData/ModDatas")
+                    if mod_datas is not None:
+                        for user_mod_data in mod_datas.findall("UserModData"):
+                            mod_id = user_mod_data.findtext("Id")
+                            is_selected = user_mod_data.findtext("IsSelected", "false").lower() == "true"
+                            if mod_id:
+                                saved_mod_states[mod_id] = is_selected
+                                saved_mod_order.append(mod_id)
+                                logger.debug(f"SubModuleTabWidget: Read {mod_id} IsSelected={is_selected} from LauncherData.xml")
+                except Exception as e:
+                    logger.error(f"SubModuleTabWidget: Failed to read LauncherData.xml: {str(e)}")
+            
+            # Enforce Sandbox and Multiplayer as enabled
+            for mod_id in ["Sandbox", "Multiplayer"]:
+                saved_mod_states[mod_id] = True
+                logger.debug(f"SubModuleTabWidget: Forced {mod_id} to IsSelected=true")
+            
+            # Build dependency graph and check for issues
+            dependencies, issues = self._build_dependency_graph(mod_data)
+            
+            # Show compatibility issues if any
+            if issues:
+                QMessageBox.warning(self, "Mod Compatibility Issues", "\n".join(issues))
+                logger.warning(f"SubModuleTabWidget: Found compatibility issues: {issues}")
+            
+            # Perform topological sort
+            try:
+                sorted_mods = self._topological_sort(dependencies, mod_data, mod_id_to_data)
+            except ValueError as e:
+                QMessageBox.critical(self, "Sort Error", f"Failed to sort mods: {str(e)}")
+                logger.error(f"SubModuleTabWidget: Sort failed: {str(e)}")
+                return
+            
+            # Align with modlist.txt for non-priority, non-native mods
+            modlist_order = self._map_modlist_to_submodules(enabled_mods, mod_data)
+            if modlist_order:
+                final_mods = []
+                seen = set()
+                # Add PRIORITY_MODS first
+                for mod_id in self.PRIORITY_MODS:
+                    if mod_id in mod_id_to_data and mod_id not in seen:
+                        final_mods.append(mod_id_to_data[mod_id])
+                        seen.add(mod_id)
+                # Add DEFAULT_MOD_ORDER next
+                for mod_id in self.DEFAULT_MOD_ORDER:
+                    if mod_id in mod_id_to_data and mod_id not in seen:
+                        final_mods.append(mod_id_to_data[mod_id])
+                        seen.add(mod_id)
+                # Add remaining mods in modlist.txt order, respecting dependencies
+                for mod_id in modlist_order:
+                    if mod_id in mod_id_to_data and mod_id not in seen and mod_id not in self.PRIORITY_MODS and mod_id not in self.DEFAULT_MOD_ORDER:
+                        final_mods.append(mod_id_to_data[mod_id])
+                        seen.add(mod_id)
+                # Add any remaining mods from topological sort
+                for mod in sorted_mods:
+                    if mod["id"] not in seen:
+                        final_mods.append(mod)
+                        seen.add(mod["id"])
+                sorted_mods = final_mods
+                logger.info("SubModuleTabWidget: Aligned sort with modlist.txt order, prioritizing PRIORITY_MODS and DEFAULT_MOD_ORDER")
+            
+            # Update UI
+            self._mod_list.blockSignals(True)
+            self._mod_list.clear()
+            current_states = {self._mod_list.item(i).data(Qt.ItemDataRole.UserRole): self._mod_list.item(i).checkState() == Qt.CheckState.Checked for i in range(self._mod_list.count()) if self._mod_list.item(i)}
+            
+            for mod in sorted_mods:
+                mod_id = mod["id"]
+                raw_version = mod["raw_version"]
+                mod_version = mod["version"]
+                is_multiplayer = mod["is_multiplayer"]
+                dep_text = mod["deps"]
+                mo2_mod_name = mod.get("mo2_mod_name", "Unknown")
+                source_path = mod.get("source_path", "Unknown")
+                display_text = f"{mod_id} ({raw_version})"
+                item = QListWidgetItem(display_text)
+                item.setData(Qt.ItemDataRole.UserRole, mod_id)
+                item.setData(Qt.ItemDataRole.UserRole + 1, is_multiplayer)
+                item.setData(Qt.ItemDataRole.UserRole + 2, mod_version)
+                item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
+                # Enforce native modules and priority mods as checked unless disabled in LauncherData.xml
+                mod_state = saved_mod_states.get(mod_id, mod_id in self.DEFAULT_MOD_ORDER or mod_id in self.PRIORITY_MODS)
+                if mod_id in ["Sandbox", "Multiplayer"]:
+                    mod_state = True
+                item.setCheckState(Qt.CheckState.Checked if mod_state else Qt.CheckState.Unchecked)
+                item.setToolTip(f"ID: {mod_id}\nVersion: {raw_version}\nMultiplayer: {is_multiplayer}\nDependencies: {dep_text}\nSource: {'Game Modules' if mod['is_native'] else f'MO2 Mods ({mo2_mod_name})'}\nPath: {source_path}")
+                self._mod_list.addItem(item)
+                logger.info(f"SubModuleTabWidget: Added sorted mod {mod_id} (ID: {mod_id}, Raw Version: {raw_version}, Parsed Version: {mod_version}, Multiplayer: {is_multiplayer}, Source: {'Game Modules' if mod['is_native'] else f'MO2 Mods ({mo2_mod_name})'}, State: {mod_state})")
+            
+            self._mod_list.blockSignals(False)
+            self._update_launcher_data_order()
+            logger.info(f"SubModuleTabWidget: Sorted {self._mod_list.count()} mods in {time() - start_time:.2f} seconds")
+        except Exception as e:
+            logger.error(f"SubModuleTabWidget: Failed to sort mods: {str(e)}")
+            QMessageBox.critical(self, "Sort Error", f"Failed to sort mods: {str(e)}")
+
     def refresh_mods(self):
         try:
             logger.info("SubModuleTabWidget: Starting refresh_mods")
@@ -503,9 +807,10 @@ class SubModuleTabWidget(QWidget):
                         except ET.ParseError as e:
                             logger.warning(f"SubModuleTabWidget: Failed to parse SubModule.xml in {xml_path}: {str(e)}")
             
-            # Read saved states from LauncherData.xml
+            # Read saved states and order from LauncherData.xml
             launcher_data_path = self._get_launcher_data_path()
             saved_mod_states = {}
+            saved_mod_order = []
             if launcher_data_path.exists():
                 try:
                     tree = ET.parse(launcher_data_path)
@@ -515,8 +820,9 @@ class SubModuleTabWidget(QWidget):
                         for user_mod_data in mod_datas.findall("UserModData"):
                             mod_id = user_mod_data.findtext("Id")
                             is_selected = user_mod_data.findtext("IsSelected", "false").lower() == "true"
-                            if mod_id and mod_id in mod_id_to_data:
+                            if mod_id:
                                 saved_mod_states[mod_id] = is_selected
+                                saved_mod_order.append(mod_id)
                                 logger.debug(f"SubModuleTabWidget: Read {mod_id} IsSelected={is_selected} from LauncherData.xml")
                 except Exception as e:
                     logger.error(f"SubModuleTabWidget: Failed to read LauncherData.xml: {str(e)}")
@@ -525,15 +831,23 @@ class SubModuleTabWidget(QWidget):
                 saved_mod_states[mod_id] = True
                 logger.debug(f"SubModuleTabWidget: Forced {mod_id} to IsSelected=true")
             
-            # Preserve existing UI order, only adding new mods
+            # Determine mod order: use saved order on startup, current order otherwise
             sorted_mods = []
             seen_mods = set()
-            for mod_id in current_order:
-                if mod_id in mod_id_to_data and mod_id not in seen_mods:
-                    sorted_mods.append(mod_id_to_data[mod_id])
-                    seen_mods.add(mod_id)
-                    logger.debug(f"SubModuleTabWidget: Preserved mod {mod_id} in current UI order")
+            if not current_order and saved_mod_order:  # On startup, prioritize LauncherData.xml order
+                for mod_id in saved_mod_order:
+                    if mod_id in mod_id_to_data and mod_id not in seen_mods:
+                        sorted_mods.append(mod_id_to_data[mod_id])
+                        seen_mods.add(mod_id)
+                        logger.debug(f"SubModuleTabWidget: Restored mod {mod_id} from LauncherData.xml order")
+            else:  # Within session, prioritize current UI order
+                for mod_id in current_order:
+                    if mod_id in mod_id_to_data and mod_id not in seen_mods:
+                        sorted_mods.append(mod_id_to_data[mod_id])
+                        seen_mods.add(mod_id)
+                        logger.debug(f"SubModuleTabWidget: Preserved mod {mod_id} in current UI order")
             
+            # Add remaining mods: PRIORITY_MODS, DEFAULT_MOD_ORDER, then others
             for mod_id in self.PRIORITY_MODS:
                 if mod_id in mod_id_to_data and mod_id not in seen_mods:
                     sorted_mods.append(mod_id_to_data[mod_id])
@@ -569,11 +883,9 @@ class SubModuleTabWidget(QWidget):
                 item.setData(Qt.ItemDataRole.UserRole + 1, is_multiplayer)
                 item.setData(Qt.ItemDataRole.UserRole + 2, mod_version)
                 item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
-                mod_state = current_states.get(mod_id, saved_mod_states.get(mod_id, False))
+                mod_state = current_states.get(mod_id, saved_mod_states.get(mod_id, mod_id in self.DEFAULT_MOD_ORDER or mod_id in self.PRIORITY_MODS))
                 if mod_id in ["Sandbox", "Multiplayer"]:
                     mod_state = True
-                elif mod_id not in self.DEFAULT_MOD_ORDER:
-                    mod_state = mod_id in mod_id_to_data
                 item.setCheckState(Qt.CheckState.Checked if mod_state else Qt.CheckState.Unchecked)
                 item.setToolTip(f"ID: {mod_id}\nVersion: {raw_version}\nMultiplayer: {is_multiplayer}\nDependencies: {dep_text}\nSource: {'Game Modules' if mod['is_native'] else f'MO2 Mods ({mo2_mod_name})'}\nPath: {source_path}")
                 self._mod_list.addItem(item)
