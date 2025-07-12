@@ -3,7 +3,7 @@ import shutil
 from datetime import datetime
 from pathlib import Path
 import xml.etree.ElementTree as ET
-from PyQt6.QtCore import QDir, QStandardPaths, Qt
+from PyQt6.QtCore import QDir, QStandardPaths, Qt, QTimer
 from PyQt6.QtWidgets import QWidget, QVBoxLayout, QListWidget, QPushButton, QHBoxLayout, QAbstractItemView, QListWidgetItem
 import mobase
 import logging
@@ -21,6 +21,13 @@ class SubModuleTabWidget(QWidget):
         "StoryMode",
         "Multiplayer"
     ]
+    PRIORITY_MODS = [
+        "Bannerlord.Harmony",
+        "Bannerlord.ButterLib",
+        "Bannerlord.UIExtenderEx",
+        "Bannerlord.MBOptionScreen"
+    ]
+    MAX_BACKUPS = 3
 
     def __init__(self, parent: QWidget | None, organizer: mobase.IOrganizer):
         super().__init__(parent)
@@ -53,6 +60,10 @@ class SubModuleTabWidget(QWidget):
         self.setLayout(self._layout)
         self._last_xml_write = 0
         self._write_cooldown = 1.0  # Seconds
+        self._queued_changes = {}  # Store mod_id: state for debouncing
+        self._debounce_timer = QTimer(self)
+        self._debounce_timer.setSingleShot(True)
+        self._debounce_timer.timeout.connect(self._process_queued_changes)
         logger.info("SubModuleTabWidget: Initialization complete")
         self.refresh_mods()
 
@@ -119,9 +130,40 @@ class SubModuleTabWidget(QWidget):
             if level and (not elem.tail or not elem.tail.strip()):
                 elem.tail = "\n" + indent * level
 
+    def _manage_backups(self, launcher_data_path: Path):
+        """Limit the number of LauncherData.xml.bak.* files to MAX_BACKUPS."""
+        try:
+            backup_pattern = launcher_data_path.with_name("LauncherData.xml.bak.*")
+            backup_files = sorted(
+                launcher_data_path.parent.glob("LauncherData.xml.bak.*"),
+                key=lambda x: x.stat().st_mtime
+            )
+            while len(backup_files) >= self.MAX_BACKUPS:
+                oldest_backup = backup_files.pop(0)
+                oldest_backup.unlink()
+                logger.info(f"SubModuleTabWidget: Removed oldest backup {oldest_backup}")
+        except Exception as e:
+            logger.error(f"SubModuleTabWidget: Failed to manage backups: {str(e)}")
+
+    def _process_queued_changes(self):
+        """Process all queued mod state changes and update LauncherData.xml."""
+        if not self._queued_changes:
+            logger.debug("SubModuleTabWidget: No queued changes to process")
+            return
+        try:
+            logger.debug(f"SubModuleTabWidget: Processing {len(self._queued_changes)} queued changes")
+            for mod_id, state in self._queued_changes.items():
+                self._update_launcher_data(changed_mod=mod_id, changed_state=state)
+            self._queued_changes.clear()
+        except Exception as e:
+            logger.error(f"SubModuleTabWidget: Failed to process queued changes: {str(e)}")
+
     def _update_launcher_data(self, changed_mod: str | None = None, changed_state: bool | None = None):
         if time() - self._last_xml_write < self._write_cooldown:
-            logger.debug("SubModuleTabWidget: Skipping LauncherData.xml write due to cooldown")
+            if changed_mod is not None and changed_state is not None:
+                self._queued_changes[changed_mod] = changed_state
+                self._debounce_timer.start(int(self._write_cooldown * 1000))
+                logger.debug(f"SubModuleTabWidget: Queued change for {changed_mod}: IsSelected={changed_state}")
             return
         try:
             launcher_data_path = self._get_launcher_data_path()
@@ -160,6 +202,7 @@ class SubModuleTabWidget(QWidget):
             
             mod_versions = {}
             mod_states = {}
+            mod_multiplayer = {}
             for i in range(self._mod_list.count()):
                 item = self._mod_list.item(i)
                 if item:
@@ -167,13 +210,11 @@ class SubModuleTabWidget(QWidget):
                     version = item.text().split("(v")[1].rstrip(")") if "(v" in item.text() else "1.2.12"
                     version = version.lstrip("v")
                     mod_versions[mod_id] = version
-                    # Use UI check state directly
                     mod_states[mod_id] = item.checkState() == Qt.CheckState.Checked
-                    # Force specific mods to be enabled
+                    mod_multiplayer[mod_id] = item.data(Qt.ItemDataRole.UserRole + 1) or False
                     if mod_id in ["Sandbox", "Multiplayer"]:
                         mod_states[mod_id] = True
                         item.setCheckState(Qt.CheckState.Checked)
-                    # Update state if this is the changed mod
                     if changed_mod == mod_id and changed_state is not None:
                         mod_states[mod_id] = changed_state
             
@@ -186,7 +227,7 @@ class SubModuleTabWidget(QWidget):
                     ET.SubElement(mod_data, "IsSelected").text = str(mod_states.get(mod_id, False)).lower()
                     logger.debug(f"SubModuleTabWidget: Added {mod_id} to SingleplayerData, IsSelected={mod_states.get(mod_id, False)}")
                 
-                if mod_id in ["Native", "Multiplayer", "Bannerlord.Harmony"]:
+                if mod_id in ["Native", "Multiplayer"] or mod_multiplayer.get(mod_id, False):
                     mod_data = ET.SubElement(multiplayer_mods, "UserModData")
                     ET.SubElement(mod_data, "Id").text = mod_id
                     ET.SubElement(mod_data, "LastKnownVersion").text = mod_versions.get(mod_id, "1.2.12")
@@ -194,7 +235,7 @@ class SubModuleTabWidget(QWidget):
                     logger.debug(f"SubModuleTabWidget: Added {mod_id} to MultiplayerData")
             
             for mod_id in mod_states:
-                if mod_id not in self.DEFAULT_MOD_ORDER and mod_id != "Bannerlord.Harmony":
+                if mod_id not in self.DEFAULT_MOD_ORDER and mod_id not in self.PRIORITY_MODS:
                     mod_data = ET.SubElement(unverified_mods, "UnverifiedModData")
                     ET.SubElement(mod_data, "Id").text = mod_id
                     ET.SubElement(mod_data, "LastKnownVersion").text = mod_versions.get(mod_id, "Unknown")
@@ -215,11 +256,15 @@ class SubModuleTabWidget(QWidget):
                         ET.SubElement(dll_check, "IsDangerous").text = "true"
                         logger.debug(f"SubModuleTabWidget: Added {dll_name} to DLLCheckData")
             
-            if not root.find("GameType"):
+            # Ensure only one GameType tag
+            existing_game_type = root.find("GameType")
+            if existing_game_type is None:
                 ET.SubElement(root, "GameType").text = "Singleplayer"
+                logger.debug("SubModuleTabWidget: Added single GameType tag")
             
             self._indent_xml(root)
             if launcher_data_path.exists():
+                self._manage_backups(launcher_data_path)
                 backup_path = launcher_data_path.with_name(f"LauncherData.xml.bak.{datetime.now().strftime('%Y%m%dT%H%M%S')}")
                 shutil.copy(launcher_data_path, backup_path)
                 logger.info(f"SubModuleTabWidget: Backed up LauncherData.xml to {backup_path}")
@@ -245,13 +290,11 @@ class SubModuleTabWidget(QWidget):
                 root.set("xmlns:xsi", "http://www.w3.org/2001/XMLSchema-instance")
                 tree = ET.ElementTree(root)
             
-            non_mod_tags = {elem.tag: ET.Element(elem.tag, elem.attrib) for elem in root if elem.tag not in ("SingleplayerData", "MultiplayerData", "DLLCheckData", "UnverifiedModDatas")}
+            # Store non-mod tags, excluding GameType to avoid duplicates
+            non_mod_tags = {elem.tag: ET.Element(elem.tag, elem.attrib) for elem in root if elem.tag not in ("SingleplayerData", "MultiplayerData", "DLLCheckData", "UnverifiedModDatas", "GameType")}
             for elem in root:
                 if elem.tag in non_mod_tags:
                     non_mod_tags[elem.tag].text = elem.text
-            if "GameType" not in non_mod_tags:
-                non_mod_tags["GameType"] = ET.Element("GameType")
-                non_mod_tags["GameType"].text = "Singleplayer"
             
             root.clear()
             root.set("xmlns:xsd", "http://www.w3.org/2001/XMLSchema")
@@ -267,6 +310,7 @@ class SubModuleTabWidget(QWidget):
             
             mod_versions = {}
             mod_states = {}
+            mod_multiplayer = {}
             for i in range(self._mod_list.count()):
                 item = self._mod_list.item(i)
                 if item:
@@ -275,6 +319,7 @@ class SubModuleTabWidget(QWidget):
                     version = version.lstrip("v")
                     mod_versions[mod_id] = version
                     mod_states[mod_id] = item.checkState() == Qt.CheckState.Checked
+                    mod_multiplayer[mod_id] = item.data(Qt.ItemDataRole.UserRole + 1) or False
                     if mod_id in ["Sandbox", "Multiplayer"]:
                         mod_states[mod_id] = True
                         item.setCheckState(Qt.CheckState.Checked)
@@ -288,7 +333,7 @@ class SubModuleTabWidget(QWidget):
                     ET.SubElement(mod_data, "IsSelected").text = str(mod_states.get(mod_id, False)).lower()
                     logger.debug(f"SubModuleTabWidget: Added {mod_id} to SingleplayerData, IsSelected={mod_states.get(mod_id, False)}")
                 
-                if mod_id in ["Native", "Multiplayer", "Bannerlord.Harmony"]:
+                if mod_id in ["Native", "Multiplayer"] or mod_multiplayer.get(mod_id, False):
                     mod_data = ET.SubElement(multiplayer_mods, "UserModData")
                     ET.SubElement(mod_data, "Id").text = mod_id
                     ET.SubElement(mod_data, "LastKnownVersion").text = mod_versions.get(mod_id, "1.2.12")
@@ -296,7 +341,7 @@ class SubModuleTabWidget(QWidget):
                     logger.debug(f"SubModuleTabWidget: Added {mod_id} to MultiplayerData")
             
             for mod_id in mod_states:
-                if mod_id not in self.DEFAULT_MOD_ORDER and mod_id != "Bannerlord.Harmony":
+                if mod_id not in self.DEFAULT_MOD_ORDER and mod_id not in self.PRIORITY_MODS:
                     mod_data = ET.SubElement(unverified_mods, "UnverifiedModData")
                     ET.SubElement(mod_data, "Id").text = mod_id
                     ET.SubElement(mod_data, "LastKnownVersion").text = mod_versions.get(mod_id, "Unknown")
@@ -314,14 +359,20 @@ class SubModuleTabWidget(QWidget):
                     ET.SubElement(dll_check, "IsDangerous").text = "true"
                     logger.debug(f"SubModuleTabWidget: Added {dll_name} to DLLCheckData")
             
+            # Restore non-mod tags
             for tag, element in non_mod_tags.items():
                 new_elem = ET.SubElement(root, tag)
                 new_elem.text = element.text
                 new_elem.attrib.update(element.attrib)
                 logger.debug(f"SubModuleTabWidget: Restored non-mod tag {tag}")
             
+            # Ensure only one GameType tag
+            ET.SubElement(root, "GameType").text = "Singleplayer"
+            logger.debug("SubModuleTabWidget: Added single GameType tag")
+            
             self._indent_xml(root)
             if launcher_data_path.exists():
+                self._manage_backups(launcher_data_path)
                 backup_path = launcher_data_path.with_name(f"LauncherData.xml.bak.{datetime.now().strftime('%Y%m%dT%H%M%S')}")
                 shutil.copy(launcher_data_path, backup_path)
                 logger.info(f"SubModuleTabWidget: Backed up LauncherData.xml to {backup_path}")
@@ -366,6 +417,10 @@ class SubModuleTabWidget(QWidget):
                                 version_elem = root.find("Version")
                                 mod_version = version_elem.get("value") if version_elem is not None and version_elem.get("value") else (version_elem.text if version_elem is not None else "1.2.12")
                                 mod_version = mod_version.strip().lstrip("ve")
+                                multiplayer_elem = root.find("MultiplayerModule")
+                                is_multiplayer = multiplayer_elem is not None and multiplayer_elem.get("value") == "true"
+                                category_elem = root.find("ModuleCategory")
+                                is_multiplayer |= category_elem is not None and category_elem.get("value") == "Multiplayer"
                                 deps = [f"{dep.get('id')} ({dep.get('version', '*')})" for dep in root.findall(".//DependedModuleMetadata") if dep.get("id")]
                                 dep_text = ", ".join(deps) if deps else "None"
                                 mod_data.append({
@@ -373,10 +428,11 @@ class SubModuleTabWidget(QWidget):
                                     "id": mod_id,
                                     "version": mod_version,
                                     "deps": dep_text,
-                                    "is_native": True
+                                    "is_native": True,
+                                    "is_multiplayer": is_multiplayer
                                 })
                                 mod_id_to_data[mod_id] = mod_data[-1]
-                                logger.info(f"SubModuleTabWidget: Found native mod {mod_name} (ID: {mod_id}, Version: {mod_version})")
+                                logger.info(f"SubModuleTabWidget: Found native mod {mod_name} (ID: {mod_id}, Version: {mod_version}, Multiplayer: {is_multiplayer})")
                             except ET.ParseError as e:
                                 logger.warning(f"SubModuleTabWidget: Failed to parse SubModule.xml in {xml_path}: {str(e)}")
                         else:
@@ -390,7 +446,8 @@ class SubModuleTabWidget(QWidget):
                         "id": mod_id,
                         "version": "1.2.12",
                         "deps": "None",
-                        "is_native": True
+                        "is_native": True,
+                        "is_multiplayer": mod_id == "Multiplayer"
                     })
                     mod_id_to_data[mod_id] = mod_data[-1]
                     logger.info(f"SubModuleTabWidget: Added missing native mod {mod_id}")
@@ -409,6 +466,10 @@ class SubModuleTabWidget(QWidget):
                             version_elem = root.find("Version")
                             mod_version = version_elem.get("value") if version_elem is not None and version_elem.get("value") else (version_elem.text if version_elem is not None else "Unknown")
                             mod_version = mod_version.strip().lstrip("ve")
+                            multiplayer_elem = root.find("MultiplayerModule")
+                            is_multiplayer = multiplayer_elem is not None and multiplayer_elem.get("value") == "true"
+                            category_elem = root.find("ModuleCategory")
+                            is_multiplayer |= category_elem is not None and category_elem.get("value") == "Multiplayer"
                             deps = [f"{dep.get('id')} ({dep.get('version', '*')})" for dep in root.findall(".//DependedModuleMetadata") if dep.get("id")]
                             dep_text = ", ".join(deps) if deps else "None"
                             mod_data.append({
@@ -416,10 +477,11 @@ class SubModuleTabWidget(QWidget):
                                 "id": mod_id,
                                 "version": mod_version,
                                 "deps": dep_text,
-                                "is_native": False
+                                "is_native": False,
+                                "is_multiplayer": is_multiplayer
                             })
                             mod_id_to_data[mod_id] = mod_data[-1]
-                            logger.info(f"SubModuleTabWidget: Found enabled MO2 mod {mod_name} (ID: {mod_id}, Version: {mod_version}, MO2 name: {mo2_mod_name})")
+                            logger.info(f"SubModuleTabWidget: Found enabled MO2 mod {mod_name} (ID: {mod_id}, Version: {mod_version}, Multiplayer: {is_multiplayer}, MO2 name: {mo2_mod_name})")
                         except ET.ParseError as e:
                             logger.warning(f"SubModuleTabWidget: Failed to parse SubModule.xml in {xml_path}: {str(e)}")
             else:
@@ -448,10 +510,24 @@ class SubModuleTabWidget(QWidget):
                 saved_mod_states[mod_id] = True
                 logger.debug(f"SubModuleTabWidget: Forced {mod_id} to IsSelected=true")
             
-            # Prioritize modlist.txt order, then current UI order, then saved XML order, then native mods
+            # Enforce load order: PRIORITY_MODS, then DEFAULT_MOD_ORDER, then other mods
             sorted_mods = []
             seen_mods = set()
-            # First, add mods in modlist.txt order
+            # Add priority mods in specified order if installed
+            for mod_id in self.PRIORITY_MODS:
+                if mod_id in mod_id_to_data and mod_id not in seen_mods:
+                    sorted_mods.append(mod_id_to_data[mod_id])
+                    seen_mods.add(mod_id)
+                    logger.debug(f"SubModuleTabWidget: Added priority mod {mod_id} at top")
+            
+            # Add native mods in DEFAULT_MOD_ORDER
+            for mod_id in self.DEFAULT_MOD_ORDER:
+                if mod_id in mod_id_to_data and mod_id not in seen_mods:
+                    sorted_mods.append(mod_id_to_data[mod_id])
+                    seen_mods.add(mod_id)
+                    logger.debug(f"SubModuleTabWidget: Added native mod {mod_id}")
+            
+            # Add remaining non-native mods from modlist.txt
             for mo2_mod_name in enabled_mods:
                 mod_path = mo2_mods_path / mo2_mod_name
                 for xml_path in mod_path.glob("**/SubModule.xml"):
@@ -459,26 +535,25 @@ class SubModuleTabWidget(QWidget):
                         tree = ET.parse(xml_path)
                         root = tree.getroot()
                         mod_id = root.findtext("Id") or xml_path.parent.name
-                        if mod_id in mod_id_to_data and mod_id not in seen_mods:
+                        if mod_id in mod_id_to_data and mod_id not in seen_mods and mod_id not in self.PRIORITY_MODS:
                             sorted_mods.append(mod_id_to_data[mod_id])
                             seen_mods.add(mod_id)
+                            logger.debug(f"SubModuleTabWidget: Added non-priority mod {mod_id} from modlist.txt")
                     except ET.ParseError:
                         continue
-            # Then, add current UI order for remaining mods
+            
+            # Add any remaining mods from current UI or saved XML order
             for mod_id in current_order:
-                if mod_id in mod_id_to_data and mod_id not in seen_mods:
+                if mod_id in mod_id_to_data and mod_id not in seen_mods and mod_id not in self.PRIORITY_MODS:
                     sorted_mods.append(mod_id_to_data[mod_id])
                     seen_mods.add(mod_id)
-            # Then, add saved XML order for remaining mods
+                    logger.debug(f"SubModuleTabWidget: Added remaining mod {mod_id} from current UI order")
+            
             for mod_id in saved_mod_order:
-                if mod_id in mod_id_to_data and mod_id not in seen_mods:
+                if mod_id in mod_id_to_data and mod_id not in seen_mods and mod_id not in self.PRIORITY_MODS:
                     sorted_mods.append(mod_id_to_data[mod_id])
                     seen_mods.add(mod_id)
-            # Finally, add remaining native mods in DEFAULT_MOD_ORDER
-            for mod_id in self.DEFAULT_MOD_ORDER:
-                if mod_id in mod_id_to_data and mod_id not in seen_mods:
-                    sorted_mods.append(mod_id_to_data[mod_id])
-                    seen_mods.add(mod_id)
+                    logger.debug(f"SubModuleTabWidget: Added remaining mod {mod_id} from saved XML order")
             
             self._mod_list.blockSignals(True)
             self._mod_list.clear()
@@ -486,21 +561,22 @@ class SubModuleTabWidget(QWidget):
                 mod_name = mod["name"]
                 mod_id = mod["id"]
                 mod_version = mod["version"]
+                is_multiplayer = mod["is_multiplayer"]
                 dep_text = mod["deps"]
                 display_text = f"{mod_name} (v{mod_version})"
                 item = QListWidgetItem(display_text)
                 item.setData(Qt.ItemDataRole.UserRole, mod_id)
+                item.setData(Qt.ItemDataRole.UserRole + 1, is_multiplayer)
                 item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
-                # Use current UI state if available, else saved state, else enabled_mods
                 mod_state = current_states.get(mod_id, saved_mod_states.get(mod_id, False))
                 if mod_id in ["Sandbox", "Multiplayer"]:
                     mod_state = True
                 elif mod_id not in self.DEFAULT_MOD_ORDER:
                     mod_state = any(mod_id in mod for mod in enabled_mods)
                 item.setCheckState(Qt.CheckState.Checked if mod_state else Qt.CheckState.Unchecked)
-                item.setToolTip(f"ID: {mod_id}\nVersion: {mod_version}\nDependencies: {dep_text}\nSource: {'Game Modules' if mod['is_native'] else 'MO2 Mods'}")
+                item.setToolTip(f"ID: {mod_id}\nVersion: {mod_version}\nMultiplayer: {is_multiplayer}\nDependencies: {dep_text}\nSource: {'Game Modules' if mod['is_native'] else 'MO2 Mods'}")
                 self._mod_list.addItem(item)
-                logger.info(f"SubModuleTabWidget: Added mod {mod_name} (ID: {mod_id}, Version: {mod_version}, Source: {'Game Modules' if mod['is_native'] else 'MO2 Mods'}, State: {mod_state})")
+                logger.info(f"SubModuleTabWidget: Added mod {mod_name} (ID: {mod_id}, Version: {mod_version}, Multiplayer: {is_multiplayer}, Source: {'Game Modules' if mod['is_native'] else 'MO2 Mods'}, State: {mod_state})")
             
             self._mod_list.blockSignals(False)
             self._update_launcher_data()
@@ -520,8 +596,9 @@ class SubModuleTabWidget(QWidget):
                 mod_state = True
                 item.setCheckState(Qt.CheckState.Checked)
                 logger.debug(f"SubModuleTabWidget: Forced {mod_id} to checked in UI")
-            self._update_launcher_data(changed_mod=mod_id, changed_state=mod_state)
-            logger.info(f"SubModuleTabWidget: Mod {mod_name} (ID: {mod_id}) {'enabled' if mod_state else 'disabled'}")
+            self._queued_changes[mod_id] = mod_state
+            self._debounce_timer.start(int(self._write_cooldown * 1000))
+            logger.info(f"SubModuleTabWidget: Queued mod {mod_name} (ID: {mod_id}) {'enabled' if mod_state else 'disabled'}")
         except Exception as e:
             logger.error(f"SubModuleTabWidget: Failed to change mod state for {mod_id or 'unknown'}: {str(e)}")
 
@@ -541,10 +618,11 @@ class SubModuleTabWidget(QWidget):
                 item = self._mod_list.item(i)
                 mod_id = item.data(Qt.ItemDataRole.UserRole)
                 item.setCheckState(Qt.CheckState.Checked)
+                self._queued_changes[mod_id] = True
                 logger.debug(f"SubModuleTabWidget: Enabled mod {mod_id}")
             self._mod_list.blockSignals(False)
-            self._update_launcher_data()
-            logger.info("SubModuleTabWidget: Enabled all mods")
+            self._debounce_timer.start(int(self._write_cooldown * 1000))
+            logger.info("SubModuleTabWidget: Queued enable all mods")
         except Exception as e:
             logger.error(f"SubModuleTabWidget: Failed to enable all mods: {str(e)}")
 
@@ -556,12 +634,14 @@ class SubModuleTabWidget(QWidget):
                 mod_id = item.data(Qt.ItemDataRole.UserRole)
                 if mod_id in ["Sandbox", "Multiplayer"]:
                     item.setCheckState(Qt.CheckState.Checked)
+                    self._queued_changes[mod_id] = True
                     logger.debug(f"SubModuleTabWidget: Forced {mod_id} to remain enabled")
                 else:
                     item.setCheckState(Qt.CheckState.Unchecked)
+                    self._queued_changes[mod_id] = False
                     logger.debug(f"SubModuleTabWidget: Disabled mod {mod_id}")
             self._mod_list.blockSignals(False)
-            self._update_launcher_data()
-            logger.info("SubModuleTabWidget: Disabled all mods (except Sandbox and Multiplayer)")
+            self._debounce_timer.start(int(self._write_cooldown * 1000))
+            logger.info("SubModuleTabWidget: Queued disable all mods (except Sandbox and Multiplayer)")
         except Exception as e:
             logger.error(f"SubModuleTabWidget: Failed to disable all mods: {str(e)}")
