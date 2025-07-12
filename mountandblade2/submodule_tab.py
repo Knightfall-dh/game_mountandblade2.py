@@ -8,6 +8,7 @@ from PyQt6.QtWidgets import QWidget, QVBoxLayout, QListWidget, QPushButton, QHBo
 import mobase
 import logging
 from time import time
+import re
 
 logger = logging.getLogger(__name__)
 
@@ -64,7 +65,20 @@ class SubModuleTabWidget(QWidget):
         self._debounce_timer = QTimer(self)
         self._debounce_timer.setSingleShot(True)
         self._debounce_timer.timeout.connect(self._process_queued_changes)
+        
+        # Connect to MO2's modOrderChanged signal
+        try:
+            self._organizer.onModOrderChanged(self._on_mod_order_changed)
+            logger.info("SubModuleTabWidget: Connected to modOrderChanged signal")
+        except AttributeError as e:
+            logger.warning(f"SubModuleTabWidget: Failed to connect to modOrderChanged signal: {str(e)}")
+        
         logger.info("SubModuleTabWidget: Initialization complete")
+        self.refresh_mods()
+
+    def _on_mod_order_changed(self):
+        """Handle mod list changes from MO2's main panel."""
+        logger.info("SubModuleTabWidget: Detected mod order change in main panel")
         self.refresh_mods()
 
     def _get_launcher_data_path(self) -> Path:
@@ -115,6 +129,31 @@ class SubModuleTabWidget(QWidget):
         except Exception as e:
             logger.error(f"SubModuleTabWidget: Failed to read modlist.txt: {str(e)}")
             return []
+
+    def _get_highest_priority_submodule_xml(self, mod_id: str, enabled_mods: list[str], enabled_mod_paths: dict[str, Path], modules_path: Path) -> tuple[Path | None, str | None]:
+        """Find the highest-priority SubModule.xml for a given mod_id."""
+        try:
+            overwrite_path = Path(self._organizer.overwritePath()) / "Modules" / mod_id / "SubModule.xml"
+            if overwrite_path.exists():
+                logger.debug(f"SubModuleTabWidget: Found SubModule.xml for {mod_id} in overwrite directory: {overwrite_path}")
+                return overwrite_path, None
+
+            for mo2_mod_name in reversed(enabled_mods):
+                mod_path = enabled_mod_paths[mo2_mod_name] / "Modules" / mod_id / "SubModule.xml"
+                if mod_path.exists():
+                    logger.debug(f"SubModuleTabWidget: Found SubModule.xml for {mod_id} in MO2 mod {mo2_mod_name}: {mod_path}")
+                    return mod_path, mo2_mod_name
+
+            game_mod_path = modules_path / mod_id / "SubModule.xml"
+            if game_mod_path.exists():
+                logger.debug(f"SubModuleTabWidget: Found SubModule.xml for {mod_id} in game Modules: {game_mod_path}")
+                return game_mod_path, None
+
+            logger.debug(f"SubModuleTabWidget: No SubModule.xml found for {mod_id}")
+            return None, None
+        except Exception as e:
+            logger.error(f"SubModuleTabWidget: Failed to find SubModule.xml for {mod_id}: {str(e)}")
+            return None, None
 
     def _indent_xml(self, elem, level=0):
         """Add proper indentation to XML element for pretty printing."""
@@ -192,13 +231,8 @@ class SubModuleTabWidget(QWidget):
             if multiplayer_mods is None:
                 multiplayer_mods = ET.SubElement(multiplayer_data, "ModDatas")
             
-            unverified_mods = root.find("UnverifiedModDatas")
-            if unverified_mods is None:
-                unverified_mods = ET.SubElement(root, "UnverifiedModDatas")
-            
             singleplayer_mods.clear()
             multiplayer_mods.clear()
-            unverified_mods.clear()
             
             mod_versions = {}
             mod_states = {}
@@ -207,8 +241,7 @@ class SubModuleTabWidget(QWidget):
                 item = self._mod_list.item(i)
                 if item:
                     mod_id = item.data(Qt.ItemDataRole.UserRole)
-                    version = item.text().split("(v")[1].rstrip(")") if "(v" in item.text() else "1.2.12"
-                    version = version.lstrip("v")
+                    version = item.data(Qt.ItemDataRole.UserRole + 2) or "v1.0.0.0"
                     mod_versions[mod_id] = version
                     mod_states[mod_id] = item.checkState() == Qt.CheckState.Checked
                     mod_multiplayer[mod_id] = item.data(Qt.ItemDataRole.UserRole + 1) or False
@@ -223,38 +256,16 @@ class SubModuleTabWidget(QWidget):
                 if mod_id != "Multiplayer":
                     mod_data = ET.SubElement(singleplayer_mods, "UserModData")
                     ET.SubElement(mod_data, "Id").text = mod_id
-                    ET.SubElement(mod_data, "LastKnownVersion").text = mod_versions.get(mod_id, "1.2.12")
+                    ET.SubElement(mod_data, "LastKnownVersion").text = mod_versions.get(mod_id, "v1.0.0.0")
                     ET.SubElement(mod_data, "IsSelected").text = str(mod_states.get(mod_id, False)).lower()
                     logger.debug(f"SubModuleTabWidget: Added {mod_id} to SingleplayerData, IsSelected={mod_states.get(mod_id, False)}")
                 
                 if mod_id in ["Native", "Multiplayer"] or mod_multiplayer.get(mod_id, False):
                     mod_data = ET.SubElement(multiplayer_mods, "UserModData")
                     ET.SubElement(mod_data, "Id").text = mod_id
-                    ET.SubElement(mod_data, "LastKnownVersion").text = mod_versions.get(mod_id, "1.2.12")
+                    ET.SubElement(mod_data, "LastKnownVersion").text = mod_versions.get(mod_id, "v1.0.0.0")
                     ET.SubElement(mod_data, "IsSelected").text = "true"
                     logger.debug(f"SubModuleTabWidget: Added {mod_id} to MultiplayerData")
-            
-            for mod_id in mod_states:
-                if mod_id not in self.DEFAULT_MOD_ORDER and mod_id not in self.PRIORITY_MODS:
-                    mod_data = ET.SubElement(unverified_mods, "UnverifiedModData")
-                    ET.SubElement(mod_data, "Id").text = mod_id
-                    ET.SubElement(mod_data, "LastKnownVersion").text = mod_versions.get(mod_id, "Unknown")
-                    logger.debug(f"SubModuleTabWidget: Added {mod_id} to UnverifiedModDatas")
-            
-            if not root.find("DLLCheckData"):
-                dll_check_data = ET.SubElement(root, "DLLCheckData")
-                dll_data = ET.SubElement(dll_check_data, "DLLData")
-                for mod_id in ["Bannerlord.ButterLib", "Bannerlord.Harmony", "Bannerlord.MBOptionScreen", "Bannerlord.UIExtenderEx", "RBM"]:
-                    if mod_id in mod_states:
-                        dll_check = ET.SubElement(dll_data, "DLLCheckData")
-                        dll_name = f"{mod_id}.dll".replace("Bannerlord.", "")
-                        if mod_id == "Bannerlord.MBOptionScreen":
-                            dll_name = "MCMv5.dll"
-                        ET.SubElement(dll_check, "DLLName").text = dll_name
-                        ET.SubElement(dll_check, "DLLVerifyInformation")
-                        ET.SubElement(dll_check, "LatestSizeInBytes").text = "0"
-                        ET.SubElement(dll_check, "IsDangerous").text = "true"
-                        logger.debug(f"SubModuleTabWidget: Added {dll_name} to DLLCheckData")
             
             # Ensure only one GameType tag
             existing_game_type = root.find("GameType")
@@ -291,7 +302,7 @@ class SubModuleTabWidget(QWidget):
                 tree = ET.ElementTree(root)
             
             # Store non-mod tags, excluding GameType to avoid duplicates
-            non_mod_tags = {elem.tag: ET.Element(elem.tag, elem.attrib) for elem in root if elem.tag not in ("SingleplayerData", "MultiplayerData", "DLLCheckData", "UnverifiedModDatas", "GameType")}
+            non_mod_tags = {elem.tag: ET.Element(elem.tag, elem.attrib) for elem in root if elem.tag not in ("SingleplayerData", "MultiplayerData", "DLLCheckData", "GameType")}
             for elem in root:
                 if elem.tag in non_mod_tags:
                     non_mod_tags[elem.tag].text = elem.text
@@ -304,9 +315,6 @@ class SubModuleTabWidget(QWidget):
             singleplayer_mods = ET.SubElement(singleplayer_data, "ModDatas")
             multiplayer_data = ET.SubElement(root, "MultiplayerData")
             multiplayer_mods = ET.SubElement(multiplayer_data, "ModDatas")
-            unverified_mods = ET.SubElement(root, "UnverifiedModDatas")
-            dll_check_data = ET.SubElement(root, "DLLCheckData")
-            dll_data = ET.SubElement(dll_check_data, "DLLData")
             
             mod_versions = {}
             mod_states = {}
@@ -315,8 +323,7 @@ class SubModuleTabWidget(QWidget):
                 item = self._mod_list.item(i)
                 if item:
                     mod_id = item.data(Qt.ItemDataRole.UserRole)
-                    version = item.text().split("(v")[1].rstrip(")") if "(v" in item.text() else "1.2.12"
-                    version = version.lstrip("v")
+                    version = item.data(Qt.ItemDataRole.UserRole + 2) or "v1.0.0.0"
                     mod_versions[mod_id] = version
                     mod_states[mod_id] = item.checkState() == Qt.CheckState.Checked
                     mod_multiplayer[mod_id] = item.data(Qt.ItemDataRole.UserRole + 1) or False
@@ -329,35 +336,16 @@ class SubModuleTabWidget(QWidget):
                 if mod_id != "Multiplayer":
                     mod_data = ET.SubElement(singleplayer_mods, "UserModData")
                     ET.SubElement(mod_data, "Id").text = mod_id
-                    ET.SubElement(mod_data, "LastKnownVersion").text = mod_versions.get(mod_id, "1.2.12")
+                    ET.SubElement(mod_data, "LastKnownVersion").text = mod_versions.get(mod_id, "v1.0.0.0")
                     ET.SubElement(mod_data, "IsSelected").text = str(mod_states.get(mod_id, False)).lower()
                     logger.debug(f"SubModuleTabWidget: Added {mod_id} to SingleplayerData, IsSelected={mod_states.get(mod_id, False)}")
                 
                 if mod_id in ["Native", "Multiplayer"] or mod_multiplayer.get(mod_id, False):
                     mod_data = ET.SubElement(multiplayer_mods, "UserModData")
                     ET.SubElement(mod_data, "Id").text = mod_id
-                    ET.SubElement(mod_data, "LastKnownVersion").text = mod_versions.get(mod_id, "1.2.12")
+                    ET.SubElement(mod_data, "LastKnownVersion").text = mod_versions.get(mod_id, "v1.0.0.0")
                     ET.SubElement(mod_data, "IsSelected").text = "true"
                     logger.debug(f"SubModuleTabWidget: Added {mod_id} to MultiplayerData")
-            
-            for mod_id in mod_states:
-                if mod_id not in self.DEFAULT_MOD_ORDER and mod_id not in self.PRIORITY_MODS:
-                    mod_data = ET.SubElement(unverified_mods, "UnverifiedModData")
-                    ET.SubElement(mod_data, "Id").text = mod_id
-                    ET.SubElement(mod_data, "LastKnownVersion").text = mod_versions.get(mod_id, "Unknown")
-                    logger.debug(f"SubModuleTabWidget: Added {mod_id} to UnverifiedModDatas")
-            
-            for mod_id in ["Bannerlord.ButterLib", "Bannerlord.Harmony", "Bannerlord.MBOptionScreen", "Bannerlord.UIExtenderEx", "RBM"]:
-                if mod_id in mod_states:
-                    dll_check = ET.SubElement(dll_data, "DLLCheckData")
-                    dll_name = f"{mod_id}.dll".replace("Bannerlord.", "")
-                    if mod_id == "Bannerlord.MBOptionScreen":
-                        dll_name = "MCMv5.dll"
-                    ET.SubElement(dll_check, "DLLName").text = dll_name
-                    ET.SubElement(dll_check, "DLLVerifyInformation")
-                    ET.SubElement(dll_check, "LatestSizeInBytes").text = "0"
-                    ET.SubElement(dll_check, "IsDangerous").text = "true"
-                    logger.debug(f"SubModuleTabWidget: Added {dll_name} to DLLCheckData")
             
             # Restore non-mod tags
             for tag, element in non_mod_tags.items():
@@ -384,111 +372,139 @@ class SubModuleTabWidget(QWidget):
         except Exception as e:
             logger.error(f"SubModuleTabWidget: Failed to update LauncherData.xml order: {str(e)}")
 
+    def _parse_version(self, version_text: str | None, mod_id: str | None = None) -> str:
+        """Parse and validate version string from SubModule.xml, normalizing format."""
+        if not version_text:
+            logger.warning(f"SubModuleTabWidget: Version text is empty for mod {mod_id or 'unknown'}, defaulting to v1.0.0.0")
+            return "v1.0.0.0"
+        version_text = version_text.strip()
+        match = re.match(r"^[ve](\d+)\.(\d+)\.(\d+)(\.\d+)?(\.\d+)?$", version_text)
+        if match:
+            prefix = version_text[0]
+            components = [str(int(match.group(i))) for i in range(1, 4)]
+            if match.group(4):
+                components.append(str(int(match.group(4)[1:])))
+            else:
+                components.append("0")
+            if match.group(5):
+                components.append(str(int(match.group(5)[1:])))
+            return f"{prefix}{'.'.join(components)}"
+        match = re.match(r"^[ve](\d+)\.(\d+)\.(\d+)$", version_text)
+        if match:
+            prefix = version_text[0]
+            components = [str(int(match.group(i))) for i in range(1, 4)]
+            components.append("0")
+            return f"{prefix}{'.'.join(components)}"
+        logger.warning(f"SubModuleTabWidget: Invalid version format '{version_text}' for mod {mod_id or 'unknown'}, defaulting to v1.0.0.0")
+        return "v1.0.0.0"
+
     def refresh_mods(self):
         try:
             logger.info("SubModuleTabWidget: Starting refresh_mods")
+            start_time = time()
             game = self._organizer.managedGame()
             if not game:
                 logger.error("SubModuleTabWidget: No managed game found")
                 return
             
-            # Store current order and states
+            # Store current UI state and order
             current_order = [self._mod_list.item(i).data(Qt.ItemDataRole.UserRole) for i in range(self._mod_list.count()) if self._mod_list.item(i)]
             current_states = {self._mod_list.item(i).data(Qt.ItemDataRole.UserRole): self._mod_list.item(i).checkState() == Qt.CheckState.Checked for i in range(self._mod_list.count()) if self._mod_list.item(i)}
             logger.debug(f"SubModuleTabWidget: Saved current order: {current_order}, states: {current_states}")
             
-            # Get enabled mods from modlist.txt in order
+            # Get enabled mods and paths
             enabled_mods = self._get_enabled_mods()
-            
+            mo2_mods_path = Path(self._organizer.modsPath())
             modules_path = Path(game.gameDirectory().absolutePath()) / "Modules"
+            enabled_mod_paths = {mo2_mod_name: mo2_mods_path / mo2_mod_name for mo2_mod_name in enabled_mods}
+            
+            # Collect all SubModule.xml files in one pass
             mod_data = []
             mod_id_to_data = {}
+            xml_cache = {}  # Cache parsed SubModule.xml data
+            
+            # Scan game Modules directory
             logger.debug(f"SubModuleTabWidget: Scanning game Modules directory: {modules_path}")
             if modules_path.exists():
                 for mod_dir in modules_path.iterdir():
                     if mod_dir.is_dir():
-                        xml_path = mod_dir / "SubModule.xml"
-                        if xml_path.exists():
+                        mod_id = mod_dir.name
+                        xml_path, _ = self._get_highest_priority_submodule_xml(mod_id, enabled_mods, enabled_mod_paths, modules_path)
+                        if xml_path and xml_path.exists() and xml_path not in xml_cache:
                             try:
                                 tree = ET.parse(xml_path)
                                 root = tree.getroot()
-                                mod_name = root.findtext("Name") or mod_dir.name
-                                mod_id = root.findtext("Id") or mod_dir.name
+                                mod_id = root.find("Id").get("value").strip() if root.find("Id") is not None else mod_dir.name
                                 version_elem = root.find("Version")
-                                mod_version = version_elem.get("value") if version_elem is not None and version_elem.get("value") else (version_elem.text if version_elem is not None else "1.2.12")
-                                mod_version = mod_version.strip().lstrip("ve")
+                                raw_version = version_elem.get("value").strip() if version_elem is not None and version_elem.get("value") else (version_elem.text.strip() if version_elem is not None and version_elem.text else "v1.0.0.0")
+                                mod_version = self._parse_version(raw_version, mod_id)
                                 multiplayer_elem = root.find("MultiplayerModule")
-                                is_multiplayer = multiplayer_elem is not None and multiplayer_elem.get("value") == "true"
+                                is_multiplayer = multiplayer_elem is not None and multiplayer_elem.get("value").strip() == "true"
                                 category_elem = root.find("ModuleCategory")
-                                is_multiplayer |= category_elem is not None and category_elem.get("value") == "Multiplayer"
+                                is_multiplayer |= category_elem is not None and category_elem.get("value").strip() == "Multiplayer"
                                 deps = [f"{dep.get('id')} ({dep.get('version', '*')})" for dep in root.findall(".//DependedModuleMetadata") if dep.get("id")]
                                 dep_text = ", ".join(deps) if deps else "None"
-                                mod_data.append({
-                                    "name": mod_name,
+                                xml_cache[xml_path] = {
                                     "id": mod_id,
+                                    "raw_version": raw_version,
                                     "version": mod_version,
+                                    "is_multiplayer": is_multiplayer,
                                     "deps": dep_text,
                                     "is_native": True,
-                                    "is_multiplayer": is_multiplayer
-                                })
+                                    "source_path": xml_path
+                                }
+                                mod_data.append(xml_cache[xml_path])
                                 mod_id_to_data[mod_id] = mod_data[-1]
-                                logger.info(f"SubModuleTabWidget: Found native mod {mod_name} (ID: {mod_id}, Version: {mod_version}, Multiplayer: {is_multiplayer})")
+                                logger.info(f"SubModuleTabWidget: Found native mod {mod_id} (ID: {mod_id}, Raw Version: {raw_version}, Parsed Version: {mod_version}, Multiplayer: {is_multiplayer}, Source: {xml_path})")
                             except ET.ParseError as e:
                                 logger.warning(f"SubModuleTabWidget: Failed to parse SubModule.xml in {xml_path}: {str(e)}")
-                        else:
-                            logger.warning(f"SubModuleTabWidget: SubModule.xml not found in {mod_dir}")
             
-            # Ensure all native mods are included
-            for mod_id in self.DEFAULT_MOD_ORDER:
-                if mod_id not in mod_id_to_data:
-                    mod_data.append({
-                        "name": mod_id,
-                        "id": mod_id,
-                        "version": "1.2.12",
-                        "deps": "None",
-                        "is_native": True,
-                        "is_multiplayer": mod_id == "Multiplayer"
-                    })
-                    mod_id_to_data[mod_id] = mod_data[-1]
-                    logger.info(f"SubModuleTabWidget: Added missing native mod {mod_id}")
-            
-            mo2_mods_path = Path(self._organizer.modsPath())
+            # Scan MO2 mods directory
             logger.debug(f"SubModuleTabWidget: Scanning MO2 mods directory: {mo2_mods_path}")
             if mo2_mods_path.exists():
                 for mo2_mod_name in enabled_mods:
-                    mod_path = mo2_mods_path / mo2_mod_name
-                    for xml_path in mod_path.glob("**/SubModule.xml"):
+                    mod_path = enabled_mod_paths[mo2_mod_name]
+                    xml_files = list(mod_path.glob("**/SubModule.xml"))
+                    for xml_path in xml_files:
+                        if xml_path in xml_cache:
+                            continue
                         try:
+                            xml_priority_path, xml_mo2_mod_name = self._get_highest_priority_submodule_xml(
+                                xml_path.parent.name, enabled_mods, enabled_mod_paths, modules_path)
+                            if xml_priority_path and xml_priority_path != xml_path:
+                                logger.debug(f"SubModuleTabWidget: Skipping {xml_path} as higher-priority file exists: {xml_priority_path}")
+                                continue
                             tree = ET.parse(xml_path)
                             root = tree.getroot()
-                            mod_name = root.findtext("Name") or xml_path.parent.name
-                            mod_id = root.findtext("Id") or xml_path.parent.name
+                            mod_id = root.find("Id").get("value").strip() if root.find("Id") is not None else xml_path.parent.name
                             version_elem = root.find("Version")
-                            mod_version = version_elem.get("value") if version_elem is not None and version_elem.get("value") else (version_elem.text if version_elem is not None else "Unknown")
-                            mod_version = mod_version.strip().lstrip("ve")
+                            raw_version = version_elem.get("value").strip() if version_elem is not None and version_elem.get("value") else (version_elem.text.strip() if version_elem is not None and version_elem.text else "v1.0.0.0")
+                            mod_version = self._parse_version(raw_version, mod_id)
                             multiplayer_elem = root.find("MultiplayerModule")
-                            is_multiplayer = multiplayer_elem is not None and multiplayer_elem.get("value") == "true"
+                            is_multiplayer = multiplayer_elem is not None and multiplayer_elem.get("value").strip() == "true"
                             category_elem = root.find("ModuleCategory")
-                            is_multiplayer |= category_elem is not None and category_elem.get("value") == "Multiplayer"
+                            is_multiplayer |= category_elem is not None and category_elem.get("value").strip() == "Multiplayer"
                             deps = [f"{dep.get('id')} ({dep.get('version', '*')})" for dep in root.findall(".//DependedModuleMetadata") if dep.get("id")]
                             dep_text = ", ".join(deps) if deps else "None"
-                            mod_data.append({
-                                "name": mod_name,
+                            xml_cache[xml_path] = {
+                                "name": mod_id,
                                 "id": mod_id,
+                                "raw_version": raw_version,
                                 "version": mod_version,
                                 "deps": dep_text,
                                 "is_native": False,
-                                "is_multiplayer": is_multiplayer
-                            })
+                                "is_multiplayer": is_multiplayer,
+                                "mo2_mod_name": mo2_mod_name,
+                                "source_path": xml_path
+                            }
+                            mod_data.append(xml_cache[xml_path])
                             mod_id_to_data[mod_id] = mod_data[-1]
-                            logger.info(f"SubModuleTabWidget: Found enabled MO2 mod {mod_name} (ID: {mod_id}, Version: {mod_version}, Multiplayer: {is_multiplayer}, MO2 name: {mo2_mod_name})")
+                            logger.info(f"SubModuleTabWidget: Found enabled MO2 mod {mod_id} (ID: {mod_id}, Raw Version: {raw_version}, Parsed Version: {mod_version}, Multiplayer: {is_multiplayer}, MO2 name: {mo2_mod_name}, Source: {xml_path})")
                         except ET.ParseError as e:
                             logger.warning(f"SubModuleTabWidget: Failed to parse SubModule.xml in {xml_path}: {str(e)}")
-            else:
-                logger.warning(f"SubModuleTabWidget: MO2 mods directory not found: {mo2_mods_path}")
             
+            # Read saved states from LauncherData.xml
             launcher_data_path = self._get_launcher_data_path()
-            saved_mod_order = []
             saved_mod_states = {}
             if launcher_data_path.exists():
                 try:
@@ -501,7 +517,6 @@ class SubModuleTabWidget(QWidget):
                             is_selected = user_mod_data.findtext("IsSelected", "false").lower() == "true"
                             if mod_id and mod_id in mod_id_to_data:
                                 saved_mod_states[mod_id] = is_selected
-                                saved_mod_order.append(mod_id)
                                 logger.debug(f"SubModuleTabWidget: Read {mod_id} IsSelected={is_selected} from LauncherData.xml")
                 except Exception as e:
                     logger.error(f"SubModuleTabWidget: Failed to read LauncherData.xml: {str(e)}")
@@ -510,77 +525,63 @@ class SubModuleTabWidget(QWidget):
                 saved_mod_states[mod_id] = True
                 logger.debug(f"SubModuleTabWidget: Forced {mod_id} to IsSelected=true")
             
-            # Enforce load order: PRIORITY_MODS, then DEFAULT_MOD_ORDER, then other mods
+            # Preserve existing UI order, only adding new mods
             sorted_mods = []
             seen_mods = set()
-            # Add priority mods in specified order if installed
+            for mod_id in current_order:
+                if mod_id in mod_id_to_data and mod_id not in seen_mods:
+                    sorted_mods.append(mod_id_to_data[mod_id])
+                    seen_mods.add(mod_id)
+                    logger.debug(f"SubModuleTabWidget: Preserved mod {mod_id} in current UI order")
+            
             for mod_id in self.PRIORITY_MODS:
                 if mod_id in mod_id_to_data and mod_id not in seen_mods:
                     sorted_mods.append(mod_id_to_data[mod_id])
                     seen_mods.add(mod_id)
-                    logger.debug(f"SubModuleTabWidget: Added priority mod {mod_id} at top")
+                    logger.debug(f"SubModuleTabWidget: Added new priority mod {mod_id}")
             
-            # Add native mods in DEFAULT_MOD_ORDER
             for mod_id in self.DEFAULT_MOD_ORDER:
                 if mod_id in mod_id_to_data and mod_id not in seen_mods:
                     sorted_mods.append(mod_id_to_data[mod_id])
                     seen_mods.add(mod_id)
-                    logger.debug(f"SubModuleTabWidget: Added native mod {mod_id}")
+                    logger.debug(f"SubModuleTabWidget: Added new native mod {mod_id}")
             
-            # Add remaining non-native mods from modlist.txt
-            for mo2_mod_name in enabled_mods:
-                mod_path = mo2_mods_path / mo2_mod_name
-                for xml_path in mod_path.glob("**/SubModule.xml"):
-                    try:
-                        tree = ET.parse(xml_path)
-                        root = tree.getroot()
-                        mod_id = root.findtext("Id") or xml_path.parent.name
-                        if mod_id in mod_id_to_data and mod_id not in seen_mods and mod_id not in self.PRIORITY_MODS:
-                            sorted_mods.append(mod_id_to_data[mod_id])
-                            seen_mods.add(mod_id)
-                            logger.debug(f"SubModuleTabWidget: Added non-priority mod {mod_id} from modlist.txt")
-                    except ET.ParseError:
-                        continue
-            
-            # Add any remaining mods from current UI or saved XML order
-            for mod_id in current_order:
-                if mod_id in mod_id_to_data and mod_id not in seen_mods and mod_id not in self.PRIORITY_MODS:
-                    sorted_mods.append(mod_id_to_data[mod_id])
+            for mod in mod_data:
+                mod_id = mod["id"]
+                if mod_id not in seen_mods:
+                    sorted_mods.append(mod)
                     seen_mods.add(mod_id)
-                    logger.debug(f"SubModuleTabWidget: Added remaining mod {mod_id} from current UI order")
-            
-            for mod_id in saved_mod_order:
-                if mod_id in mod_id_to_data and mod_id not in seen_mods and mod_id not in self.PRIORITY_MODS:
-                    sorted_mods.append(mod_id_to_data[mod_id])
-                    seen_mods.add(mod_id)
-                    logger.debug(f"SubModuleTabWidget: Added remaining mod {mod_id} from saved XML order")
+                    logger.debug(f"SubModuleTabWidget: Added new mod {mod_id}")
             
             self._mod_list.blockSignals(True)
             self._mod_list.clear()
             for mod in sorted_mods:
-                mod_name = mod["name"]
                 mod_id = mod["id"]
+                raw_version = mod["raw_version"]
                 mod_version = mod["version"]
                 is_multiplayer = mod["is_multiplayer"]
                 dep_text = mod["deps"]
-                display_text = f"{mod_name} (v{mod_version})"
+                mo2_mod_name = mod.get("mo2_mod_name", "Unknown")
+                source_path = mod.get("source_path", "Unknown")
+                display_text = f"{mod_id} ({raw_version})"
                 item = QListWidgetItem(display_text)
                 item.setData(Qt.ItemDataRole.UserRole, mod_id)
                 item.setData(Qt.ItemDataRole.UserRole + 1, is_multiplayer)
+                item.setData(Qt.ItemDataRole.UserRole + 2, mod_version)
                 item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
                 mod_state = current_states.get(mod_id, saved_mod_states.get(mod_id, False))
                 if mod_id in ["Sandbox", "Multiplayer"]:
                     mod_state = True
                 elif mod_id not in self.DEFAULT_MOD_ORDER:
-                    mod_state = any(mod_id in mod for mod in enabled_mods)
+                    mod_state = mod_id in mod_id_to_data
                 item.setCheckState(Qt.CheckState.Checked if mod_state else Qt.CheckState.Unchecked)
-                item.setToolTip(f"ID: {mod_id}\nVersion: {mod_version}\nMultiplayer: {is_multiplayer}\nDependencies: {dep_text}\nSource: {'Game Modules' if mod['is_native'] else 'MO2 Mods'}")
+                item.setToolTip(f"ID: {mod_id}\nVersion: {raw_version}\nMultiplayer: {is_multiplayer}\nDependencies: {dep_text}\nSource: {'Game Modules' if mod['is_native'] else f'MO2 Mods ({mo2_mod_name})'}\nPath: {source_path}")
                 self._mod_list.addItem(item)
-                logger.info(f"SubModuleTabWidget: Added mod {mod_name} (ID: {mod_id}, Version: {mod_version}, Multiplayer: {is_multiplayer}, Source: {'Game Modules' if mod['is_native'] else 'MO2 Mods'}, State: {mod_state})")
+                logger.info(f"SubModuleTabWidget: Added mod {mod_id} (ID: {mod_id}, Raw Version: {raw_version}, Parsed Version: {mod_version}, Multiplayer: {is_multiplayer}, Source: {'Game Modules' if mod['is_native'] else f'MO2 Mods ({mo2_mod_name})'}, State: {mod_state})")
             
             self._mod_list.blockSignals(False)
             self._update_launcher_data()
-            logger.info(f"SubModuleTabWidget: Loaded {self._mod_list.count()} mods")
+            logger.info(f"SubModuleTabWidget: Loaded {self._mod_list.count()} mods in {time() - start_time:.2f} seconds")
         except Exception as e:
             logger.error(f"SubModuleTabWidget: Failed to refresh mods: {str(e)}")
 
@@ -590,7 +591,7 @@ class SubModuleTabWidget(QWidget):
             if not mod_id:
                 logger.warning("SubModuleTabWidget: Item has no UserRole data")
                 return
-            mod_name = item.text().split(" (v")[0]
+            mod_name = item.text().split(" (")[0]
             mod_state = item.checkState() == Qt.CheckState.Checked
             if mod_id in ["Sandbox", "Multiplayer"]:
                 mod_state = True
