@@ -14,6 +14,7 @@ from ..basic_game import BasicGame
 from ..basic_features import BasicLocalSavegames, BasicGameSaveGameInfo
 from ..basic_features.basic_save_game_info import BasicGameSaveGame, format_date
 from .mountandblade2.submodule_tab import SubModuleTabWidget
+from .mountandblade2.mod_config_manager import ModConfigManagerWidget
 
 # Ensure games directory is in sys.path
 games_dir = Path(__file__).parent
@@ -213,7 +214,7 @@ class MountAndBladeIIGame(BasicGame):
 
     def init_tab(self, main_window: QMainWindow):
         try:
-            logging.info("MountAndBladeIIGame: Initializing SubModules tab")
+            logging.info("MountAndBladeIIGame: Initializing tabs")
             if self._organizer.managedGame() != self:
                 logging.info("MountAndBladeIIGame: Not the managed game, skipping tab initialization")
                 return
@@ -225,6 +226,8 @@ class MountAndBladeIIGame(BasicGame):
             if not tab_widget.findChild(QWidget, "espTab"):
                 logging.warning("MountAndBladeIIGame: No 'espTab' found in tabWidget")
                 return
+            
+            # Add SubModules tab
             self._submodule_tab = SubModuleTabWidget(main_window, self._organizer)
             plugin_tab = tab_widget.findChild(QWidget, "espTab")
             tab_index = tab_widget.indexOf(plugin_tab) + 1
@@ -232,8 +235,13 @@ class MountAndBladeIIGame(BasicGame):
                 tab_index += 1
             tab_widget.insertTab(tab_index, self._submodule_tab, "SubModules")
             logging.info(f"MountAndBladeIIGame: SubModules tab inserted at index {tab_index}")
+            
+            # Add Mod Configs tab
+            self._config_tab = ModConfigManagerWidget(main_window, self._organizer)
+            tab_widget.insertTab(tab_index + 1, self._config_tab, "Mod Configs")
+            logging.info(f"MountAndBladeIIGame: Mod Configs tab inserted at index {tab_index + 1}")
         except Exception as e:
-            logging.error(f"MountAndBladeIIGame: Failed to initialize SubModules tab: {str(e)}")
+            logging.error(f"MountAndBladeIIGame: Failed to initialize tabs: {str(e)}")
 
     def savesDirectory(self) -> QDir:
         try:
