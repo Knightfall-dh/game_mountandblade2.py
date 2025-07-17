@@ -72,10 +72,7 @@ This plugin extends [Mod Organizer 2 (MO2)](https://www.modorganizer.org/) to pr
 - **API Reference**: See [MO2 Python Plugins Documentation](https://www.modorganizer.org/python-plugins-doc/index.html).
 - **Issues**: Report bugs or suggest features via GitHub Issues.
 
-## License
-MIT License. See `LICENSE` for details.
-
-
+## Tree
 MO2\plugins\basic_games\  
 │   basic_game.py  
 │   basic_game_ini.py  
@@ -96,3 +93,7 @@ MO2\plugins\basic_games\
 │   │       mod_config_manager.py  
 │   │       submodule_tab.py   
 │   │       __init__.py   
+
+
+## License
+MIT License. See `LICENSE` for details.

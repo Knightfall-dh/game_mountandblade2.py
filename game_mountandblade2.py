@@ -326,24 +326,25 @@ class MountAndBladeIIGame(BasicGame):
 
     def executables(self) -> list[mobase.ExecutableInfo]:
         try:
-            game_dir = self.gameDirectory()
+            game_path = QDir(self.gameDirectory().absolutePath())
+            bin_path = game_path.absoluteFilePath("bin/Win64_Shipping_Client")
             executables = [
                 mobase.ExecutableInfo(
                     "Mount & Blade II: Bannerlord (Launcher)",
-                    QFileInfo(game_dir, "bin/Win64_Shipping_Client/TaleWorlds.MountAndBlade.Launcher.exe"),
-                ).withWorkingDirectory(game_dir),
+                    QFileInfo(QDir(bin_path), "TaleWorlds.MountAndBlade.Launcher.exe")
+                ).withWorkingDirectory(bin_path),
                 mobase.ExecutableInfo(
                     "Mount & Blade II: Bannerlord",
-                    QFileInfo(game_dir, "bin/Win64_Shipping_Client/Bannerlord.exe"),
-                ).withWorkingDirectory(game_dir),
+                    QFileInfo(QDir(bin_path), "Bannerlord.exe")
+                ).withWorkingDirectory(bin_path),
                 mobase.ExecutableInfo(
                     "Mount & Blade II: Bannerlord (Native)",
-                    QFileInfo(game_dir, "bin/Win64_Shipping_Client/Bannerlord.Native.exe"),
-                ).withWorkingDirectory(game_dir),
+                    QFileInfo(QDir(bin_path), "Bannerlord.Native.exe")
+                ).withWorkingDirectory(bin_path),
                 mobase.ExecutableInfo(
                     "Mount & Blade II: Bannerlord (Singleplayer)",
-                    QFileInfo(game_dir, "bin/Win64_Shipping_Client/TaleWorlds.MountAndBlade.Launcher.Singleplayer.exe"),
-                ).withWorkingDirectory(game_dir),
+                    QFileInfo(QDir(bin_path), "TaleWorlds.MountAndBlade.Launcher.Singleplayer.exe")
+                ).withWorkingDirectory(bin_path),
             ]
             for exe in executables:
                 exe_info = exe.binary()  # Access QFileInfo object
