@@ -192,10 +192,16 @@ class MountAndBladeIIGame(BasicGame):
     GameGogId = 1564781494
     GameEpicId = "Chickadee"
 
+    def __init__(self):
+        super().__init__()
+        self._submodule_tab = None
+        self._config_tab = None
+        self._organizer = None
+        self._main_window = None
+
     def init(self, organizer: mobase.IOrganizer):
         try:
             logging.info("MountAndBladeIIGame: Starting init")
-            super().__init__()
             self._organizer = organizer
             self._register_feature(MountAndBladeIIModDataChecker())
             self._register_feature(BannerlordModDataContent())
@@ -216,13 +222,26 @@ class MountAndBladeIIGame(BasicGame):
             return False
 
     def _pre_run_sync(self, appName: str) -> bool:
-        """Sync profile configs to game directory before game launch."""
+        """Sync profile configs to game directory and set CLI arguments for Bannerlord.exe before game launch."""
         try:
             logging.info(f"MountAndBladeIIGame: Pre-run sync for {appName}")
             if hasattr(self, '_config_tab'):
                 self._config_tab.sync_to_game(force=True)
             else:
                 logging.warning("MountAndBladeIIGame: Config tab not initialized, skipping sync")
+
+            if appName.lower().endswith("bannerlord.exe") and hasattr(self, '_submodule_tab') and self._submodule_tab:
+                load_order = self._submodule_tab.get_enabled_load_order()
+                if load_order:
+                    cli_arg = f"/singleplayer _MODULES_*{'*'.join(load_order)}*_MODULES_"
+                    logging.info(f"MountAndBladeIIGame: Setting CLI arguments for Bannerlord.exe: {cli_arg}")
+                    # Update the executable arguments in MO2
+                    for exe in self.executables():
+                        if exe.title() == "Mount & Blade II: Bannerlord":
+                            exe.withArgument(cli_arg)
+                            break
+                else:
+                    logging.warning("MountAndBladeIIGame: No enabled mods found for CLI arguments")
             return True
         except Exception as e:
             logging.error(f"MountAndBladeIIGame: Pre-run sync failed: {str(e)}")
@@ -347,7 +366,7 @@ class MountAndBladeIIGame(BasicGame):
                 ).withWorkingDirectory(bin_path),
             ]
             for exe in executables:
-                exe_info = exe.binary()  # Access QFileInfo object
+                exe_info = exe.binary()
                 if not exe_info.exists():
                     logging.warning(f"Executable not found: {exe_info.filePath()}")
                 else:

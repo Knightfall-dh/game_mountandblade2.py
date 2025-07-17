@@ -29,8 +29,7 @@ class SubModuleTabWidget(QWidget):
         "Bannerlord.Harmony",
         "Bannerlord.ButterLib",
         "Bannerlord.UIExtenderEx",
-        "Bannerlord.MBOptionScreen",
-        "MCMv5"
+        "Bannerlord.MBOptionScreen"
     ]
     MAX_BACKUPS = 3
     WRITE_COOLDOWN = 0.5
@@ -81,7 +80,27 @@ class SubModuleTabWidget(QWidget):
         
         logger.debug("SubModuleTabWidget: Initialization complete")
         self.refresh_mods()
-
+        
+    def get_enabled_load_order(self) -> list[str]:
+        """Return the list of enabled mod IDs in their current order, excluding Multiplayer for singleplayer mode."""
+        try:
+            logger.debug("SubModuleTabWidget: Retrieving enabled load order")
+            load_order = []
+            for i in range(self._mod_list.count()):
+                item = self._mod_list.item(i)
+                if item and item.checkState() == Qt.CheckState.Checked:
+                    mod_id = item.data(Qt.ItemDataRole.UserRole)
+                    if mod_id and mod_id != "Multiplayer":
+                        load_order.append(mod_id)
+            logger.debug(f"SubModuleTabWidget: Enabled load order: {load_order}")
+            # Debug: Write load order to a file
+            with open(Path(self._organizer.profilePath()) / "load_order_debug.txt", "w") as f:
+                f.write(str(load_order))
+            return load_order
+        except Exception as e:
+            logger.error(f"SubModuleTabWidget: Failed to retrieve enabled load order: {str(e)}")
+            return []
+            
     def _check_modlist_changed(self) -> bool:
         """Check if modlist.txt has changed since last refresh/sort."""
         try:
