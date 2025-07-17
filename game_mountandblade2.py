@@ -171,7 +171,7 @@ class BannerlordModDataContent(mobase.ModDataContent):
 class MountAndBladeIIGame(BasicGame):
     Name = "Mount & Blade II: Bannerlord"
     Author = "d&h"
-    Version = "0.1.21"
+    Version = "0.1.23"
     Description = "Adds support for Mount & Blade II: Bannerlord"
 
     GameName = "Mount & Blade II: Bannerlord"
@@ -202,15 +202,53 @@ class MountAndBladeIIGame(BasicGame):
             self._register_feature(BasicGameSaveGameInfo(get_metadata=getMetadata, get_preview=get_preview, max_width=400))
             self._register_feature(BasicLocalSavegames(self.savesDirectory()))
             try:
-                logging.info("MountAndBladeIIGame: Registering UI callback")
+                logging.info("MountAndBladeIIGame: Registering UI and run callbacks")
                 organizer.onUserInterfaceInitialized(self.init_tab)
+                organizer.onAboutToRun(self._pre_run_sync)
+                organizer.onFinishedRun(self._post_run_sync)
+                organizer.onProfileChanged(self._on_profile_changed)
             except Exception as e:
-                logging.error(f"MountAndBladeIIGame: Failed to register UI callback: {str(e)}")
+                logging.error(f"MountAndBladeIIGame: Failed to register callbacks: {str(e)}")
             logging.info("MountAndBladeIIGame: Initialization complete")
             return True
         except Exception as e:
             logging.error(f"MountAndBladeIIGame: Initialization failed: {str(e)}")
             return False
+
+    def _pre_run_sync(self, appName: str) -> bool:
+        """Sync profile configs to game directory before game launch."""
+        try:
+            logging.info(f"MountAndBladeIIGame: Pre-run sync for {appName}")
+            if hasattr(self, '_config_tab'):
+                self._config_tab.sync_to_game(force=True)
+            else:
+                logging.warning("MountAndBladeIIGame: Config tab not initialized, skipping sync")
+            return True
+        except Exception as e:
+            logging.error(f"MountAndBladeIIGame: Pre-run sync failed: {str(e)}")
+            return True
+
+    def _post_run_sync(self, appName: str, result: int):
+        """Sync game directory configs to profile after game completion."""
+        try:
+            logging.info(f"MountAndBladeIIGame: Post-run sync for {appName}, result: {result}")
+            if hasattr(self, '_config_tab'):
+                self._config_tab.sync_to_profile()
+            else:
+                logging.warning("MountAndBladeIIGame: Config tab not initialized, skipping sync")
+        except Exception as e:
+            logging.error(f"MountAndBladeIIGame: Post-run sync failed: {str(e)}")
+
+    def _on_profile_changed(self, oldProfile: mobase.IProfile, newProfile: mobase.IProfile):
+        """Handle profile changes by refreshing config files."""
+        try:
+            old_name = oldProfile.name() if oldProfile else "None"
+            new_name = newProfile.name() if newProfile else "None"
+            logging.info(f"MountAndBladeIIGame: Profile changed from {old_name} to {new_name}")
+            if hasattr(self, '_config_tab'):
+                self._config_tab.refresh_on_profile_change()
+        except Exception as e:
+            logging.error(f"MountAndBladeIIGame: Profile change handling failed: {str(e)}")
 
     def init_tab(self, main_window: QMainWindow):
         try:
@@ -226,8 +264,8 @@ class MountAndBladeIIGame(BasicGame):
             if not tab_widget.findChild(QWidget, "espTab"):
                 logging.warning("MountAndBladeIIGame: No 'espTab' found in tabWidget")
                 return
-            
-            # Add SubModules tab
+
+            # Initialize SubModules tab
             self._submodule_tab = SubModuleTabWidget(main_window, self._organizer)
             plugin_tab = tab_widget.findChild(QWidget, "espTab")
             tab_index = tab_widget.indexOf(plugin_tab) + 1
@@ -235,11 +273,14 @@ class MountAndBladeIIGame(BasicGame):
                 tab_index += 1
             tab_widget.insertTab(tab_index, self._submodule_tab, "SubModules")
             logging.info(f"MountAndBladeIIGame: SubModules tab inserted at index {tab_index}")
-            
-            # Add Mod Configs tab
+
+            # Initialize Mod Configs tab
             self._config_tab = ModConfigManagerWidget(main_window, self._organizer)
-            tab_widget.insertTab(tab_index + 1, self._config_tab, "Mod Configs")
-            logging.info(f"MountAndBladeIIGame: Mod Configs tab inserted at index {tab_index + 1}")
+            tab_index += 1
+            if not tab_widget.isTabVisible(tab_index):
+                tab_index += 1
+            tab_widget.insertTab(tab_index, self._config_tab, "Mod Configs")
+            logging.info(f"MountAndBladeIIGame: Mod Configs tab inserted at index {tab_index}")
         except Exception as e:
             logging.error(f"MountAndBladeIIGame: Failed to initialize tabs: {str(e)}")
 
@@ -285,24 +326,32 @@ class MountAndBladeIIGame(BasicGame):
 
     def executables(self) -> list[mobase.ExecutableInfo]:
         try:
-            return [
+            game_dir = self.gameDirectory()
+            executables = [
                 mobase.ExecutableInfo(
                     "Mount & Blade II: Bannerlord (Launcher)",
-                    QFileInfo(self.gameDirectory(), "bin/Win64_Shipping_Client/TaleWorlds.MountAndBlade.Launcher.exe"),
-                ),
+                    QFileInfo(game_dir, "bin/Win64_Shipping_Client/TaleWorlds.MountAndBlade.Launcher.exe"),
+                ).withWorkingDirectory(game_dir),
                 mobase.ExecutableInfo(
                     "Mount & Blade II: Bannerlord",
-                    QFileInfo(self.gameDirectory(), "bin/Win64_Shipping_Client/Bannerlord.exe"),
-                ),
+                    QFileInfo(game_dir, "bin/Win64_Shipping_Client/Bannerlord.exe"),
+                ).withWorkingDirectory(game_dir),
                 mobase.ExecutableInfo(
                     "Mount & Blade II: Bannerlord (Native)",
-                    QFileInfo(self.gameDirectory(), "bin/Win64_Shipping_Client/Bannerlord.Native.exe"),
-                ),
+                    QFileInfo(game_dir, "bin/Win64_Shipping_Client/Bannerlord.Native.exe"),
+                ).withWorkingDirectory(game_dir),
                 mobase.ExecutableInfo(
                     "Mount & Blade II: Bannerlord (Singleplayer)",
-                    QFileInfo(self.gameDirectory(), "bin/Win64_Shipping_Client/TaleWorlds.MountAndBlade.Launcher.Singleplayer.exe"),
-                ),
+                    QFileInfo(game_dir, "bin/Win64_Shipping_Client/TaleWorlds.MountAndBlade.Launcher.Singleplayer.exe"),
+                ).withWorkingDirectory(game_dir),
             ]
+            for exe in executables:
+                exe_info = exe.binary()  # Access QFileInfo object
+                if not exe_info.exists():
+                    logging.warning(f"Executable not found: {exe_info.filePath()}")
+                else:
+                    logging.info(f"Registered executable: {exe_info.filePath()}")
+            return executables
         except Exception as e:
             logging.error(f"Failed to generate executables: {str(e)}")
             return []

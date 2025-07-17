@@ -1,278 +1,380 @@
-# V:\Mod.Organizer-2.5.3beta2\plugins\games\mountandblade2\mod_config_manager.py
 import os
-from pathlib import Path
-from PyQt6.QtWidgets import QWidget, QVBoxLayout, QTreeWidget, QTreeWidgetItem, QPushButton, QHBoxLayout, QTextEdit, QSplitter, QFileDialog, QMessageBox
-from PyQt6.QtCore import Qt, QUrl, QRegularExpression, QStandardPaths
-from PyQt6.QtGui import QSyntaxHighlighter, QTextCharFormat, QColor, QDesktopServices
-import mobase
 import logging
-import shutil
 import json
-import xml.etree.ElementTree as ET
-from typing import List, Tuple
-
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
-
-class ConfigHighlighter(QSyntaxHighlighter):
-    def __init__(self, parent, file_type: str):
-        super().__init__(parent)
-        self.file_type = file_type.lower()
-        self._highlight_rules = []
-        
-        # Define highlighting rules
-        if self.file_type == "ini":
-            # INI: Key=value, comments
-            key_format = QTextCharFormat()
-            key_format.setForeground(QColor("blue"))
-            self._highlight_rules.append((QRegularExpression(r"^\w+\s*="), key_format))
-            comment_format = QTextCharFormat()
-            comment_format.setForeground(QColor("gray"))
-            self._highlight_rules.append((QRegularExpression(r";.*$"), comment_format))
-        elif self.file_type == "json":
-            # JSON: Keys, strings, numbers
-            key_format = QTextCharFormat()
-            key_format.setForeground(QColor("purple"))
-            self._highlight_rules.append((QRegularExpression(r'"\w+"(?=\s*:)'), key_format))
-            string_format = QTextCharFormat()
-            string_format.setForeground(QColor("green"))
-            self._highlight_rules.append((QRegularExpression(r'"[^"]*"'), string_format))
-            number_format = QTextCharFormat()
-            number_format.setForeground(QColor("red"))
-            self._highlight_rules.append((QRegularExpression(r'\b\d+\.?\d*\b'), number_format))
-        elif self.file_type == "xml":
-            # XML: Tags, attributes
-            tag_format = QTextCharFormat()
-            tag_format.setForeground(QColor("blue"))
-            self._highlight_rules.append((QRegularExpression(r'</?\w+'), tag_format))
-            attr_format = QTextCharFormat()
-            attr_format.setForeground(QColor("purple"))
-            self._highlight_rules.append((QRegularExpression(r'\w+(?=\s*=)'), attr_format))
-
-    def highlightBlock(self, text: str):
-        for pattern, fmt in self._highlight_rules:
-            expression = QRegularExpression(pattern)
-            it = expression.globalMatch(text)
-            while it.hasNext():
-                match = it.next()
-                self.setFormat(match.capturedStart(), match.capturedLength(), fmt)
+from pathlib import Path
+from PyQt6.QtCore import QDir, Qt, QStandardPaths, QUrl, QFileSystemWatcher
+from PyQt6.QtWidgets import QMainWindow, QTreeWidget, QTreeWidgetItem, QPushButton, QVBoxLayout, QWidget, QHeaderView, QMessageBox, QTabWidget, QLabel
+from PyQt6.QtGui import QDesktopServices
+import mobase
+import shutil
+from datetime import datetime
 
 class ModConfigManagerWidget(QWidget):
-    def __init__(self, parent: QWidget | None, organizer: mobase.IOrganizer):
+    def __init__(self, parent: QMainWindow, organizer: mobase.IOrganizer):
         super().__init__(parent)
+        self._parent = parent
         self._organizer = organizer
-        self._layout = QVBoxLayout(self)
-        
-        # Splitter for tree and editor
-        self._splitter = QSplitter(Qt.Orientation.Horizontal, self)
-        self._layout.addWidget(self._splitter)
-        
-        # Config tree
+        self._file_timestamps = {}  # Track file modification times
+        self._file_watcher = QFileSystemWatcher(self)
+        self._file_watcher.directoryChanged.connect(self._on_directory_changed)
+        self._file_watcher.fileChanged.connect(self._on_file_changed)
+        self._current_profile_path = Path(self._organizer.profilePath())
+        self._init_ui()
+        self._setup_watcher()
+
+    def _init_ui(self):
+        layout = QVBoxLayout(self)
+
+        # Tab widget for Mod Configs and Status
+        self._tab_widget = QTabWidget()
+        layout.addWidget(self._tab_widget)
+
+        # Mod Configs tab
+        self._configs_tab = QWidget()
+        configs_layout = QVBoxLayout(self._configs_tab)
+
         self._config_tree = QTreeWidget(self)
-        self._config_tree.setHeaderLabels(["Mod", "Config File", "Profile Path"])
-        self._config_tree.setColumnWidth(0, 200)
-        self._config_tree.setColumnWidth(1, 300)
-        self._config_tree.itemClicked.connect(self._load_config)
-        self._splitter.addWidget(self._config_tree)
-        
-        # Editor
-        self._editor = QTextEdit(self)
-        self._editor.setPlaceholderText("Select a config file to edit...")
-        self._editor.textChanged.connect(self._on_text_changed)
-        self._splitter.addWidget(self._editor)
-        self._current_config_path = None
-        self._highlighter = None
-        
-        # Buttons
-        button_layout = QHBoxLayout()
-        self._refresh_button = QPushButton("Refresh Configs", self)
-        self._refresh_button.clicked.connect(self._refresh_configs)
-        button_layout.addWidget(self._refresh_button)
-        
-        self._save_button = QPushButton("Save Changes", self)
-        self._save_button.clicked.connect(self._save_config)
-        self._save_button.setEnabled(False)
-        button_layout.addWidget(self._save_button)
-        
-        self._restore_button = QPushButton("Restore Original", self)
-        self._restore_button.clicked.connect(self._restore_original)
-        button_layout.addWidget(self._restore_button)
-        
-        self._open_external_button = QPushButton("Open in External Editor", self)
-        self._open_external_button.clicked.connect(self._open_external)
-        button_layout.addWidget(self._open_external_button)
-        
-        self._layout.addLayout(button_layout)
-        self.setLayout(self._layout)
-        self._refresh_configs()
+        self._config_tree.setHeaderLabels(["Config File", "Profile Path"])
+        self._config_tree.header().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
+        self._config_tree.setSelectionMode(QTreeWidget.SelectionMode.SingleSelection)
+        configs_layout.addWidget(self._config_tree)
 
-    def _get_documents_path(self) -> Path:
-        docs_path = QStandardPaths.writableLocation(QStandardPaths.StandardLocation.DocumentsLocation)
-        return Path(docs_path) / "Mount and Blade II Bannerlord"
+        self._open_button = QPushButton("Open in External Editor", self)
+        self._open_button.clicked.connect(self._open_external)
+        self._open_button.setEnabled(False)
+        configs_layout.addWidget(self._open_button)
 
-    def _get_profile_configs_path(self) -> Path:
-        return Path(self._organizer.profilePath()) / "mod_configs"
+        self._config_tree.itemSelectionChanged.connect(self._update_button_state)
+        self._configs_tab.setLayout(configs_layout)
+        self._tab_widget.addTab(self._configs_tab, "Mod Configs")
 
-    def _find_mod_configs(self) -> List[Tuple[str, Path, Path]]:
+        # Status tab
+        self._status_tab = QWidget()
+        status_layout = QVBoxLayout(self._status_tab)
+        self._status_label = QLabel("Configs Synced")
+        self._status_label.setToolTip("Profile and game configurations are synchronized")
+        status_layout.addWidget(self._status_label)
+        self._status_tab.setLayout(status_layout)
+        self._tab_widget.addTab(self._status_tab, "Status")
+
+        self.setLayout(layout)
+        self._load_configs()
+
+    def _setup_watcher(self):
+        """Set up QFileSystemWatcher to monitor the Configs directories."""
+        try:
+            docs_path = Path(QDir(QStandardPaths.writableLocation(QStandardPaths.StandardLocation.DocumentsLocation)).filePath("Mount and Blade II Bannerlord/Configs"))
+            profile_configs = Path(self._organizer.profilePath()) / "mod_configs"
+            for path in [docs_path, profile_configs]:
+                if path.exists():
+                    self._file_watcher.addPath(str(path))
+                    logging.info(f"ModConfigManagerWidget: Watching directory {path}")
+                else:
+                    logging.warning(f"ModConfigManagerWidget: Directory does not exist: {path}")
+        except Exception as e:
+            logging.error(f"ModConfigManagerWidget: Failed to set up file watcher: {str(e)}")
+
+    def _on_directory_changed(self, path: str):
+        """Handle directory changes by updating configs and status."""
+        logging.debug(f"ModConfigManagerWidget: Directory changed: {path}")
+        self._load_configs()
+        self._update_status()
+
+    def _on_file_changed(self, path: str):
+        """Handle file changes by updating configs and status."""
+        logging.debug(f"ModConfigManagerWidget: File changed: {path}")
+        self._load_configs()
+        self._update_status()
+
+    def refresh_on_profile_change(self):
+        """Refresh configs when profile changes and force sync to game directory."""
+        try:
+            new_profile_path = Path(self._organizer.profilePath())
+            if new_profile_path != self._current_profile_path:
+                logging.info(f"ModConfigManagerWidget: Profile changed to {new_profile_path}")
+                self._current_profile_path = new_profile_path
+                self._file_timestamps.clear()
+                self._load_configs()
+                self.sync_to_game(force=True)  # Force sync to game directory on profile change
+                # Update watcher for new profile's mod_configs directory
+                profile_configs = Path(self._organizer.profilePath()) / "mod_configs"
+                if profile_configs.exists():
+                    self._file_watcher.addPath(str(profile_configs))
+                    logging.info(f"ModConfigManagerWidget: Added watcher for {profile_configs}")
+        except Exception as e:
+            logging.error(f"ModConfigManagerWidget: Failed to refresh on profile change: {str(e)}")
+
+    def _find_mod_configs(self) -> list[tuple[Path, Path]]:
         configs = []
-        docs_path = self._get_documents_path()
-        profile_configs_path = self._get_profile_configs_path()
-        profile_configs_path.mkdir(exist_ok=True)
-        
-        config_extensions = {".xml", ".json", ".ini", ".txt"}
-        known_folders = {"Configs", "Config", "Modules"}
-        
+        docs_path = Path(QDir(QStandardPaths.writableLocation(QStandardPaths.StandardLocation.DocumentsLocation)).filePath("Mount and Blade II Bannerlord/Configs"))
+        profile_path = Path(self._organizer.profilePath()) / "mod_configs"
+        config_extensions = {".xml", ".json", ".ini"}
+        excluded_files = {"engine_config.txt", "BannerlordConfig.txt", "LauncherData.xml"}
+        known_folders = {"Configs", "Config", "Modules", "ModSettings"}
+
         for file in docs_path.rglob("*"):
-            if file.suffix.lower() in config_extensions and any(folder in file.parts for folder in known_folders):
-                mod_name = self._get_mod_name(file)
+            if (file.suffix.lower() in config_extensions and
+                any(folder in file.parts for folder in known_folders) and
+                file.name not in excluded_files):
+                # Validate JSON files
+                if file.suffix.lower() == ".json":
+                    try:
+                        with open(file, "r", encoding="utf-8-sig") as f:
+                            json.load(f)
+                        logging.debug(f"Valid JSON config: {file}")
+                    except json.JSONDecodeError as e:
+                        logging.warning(f"Invalid JSON config: {file} - Error: {e}")
+                        continue
                 relative_path = file.relative_to(docs_path)
-                profile_path = profile_configs_path / relative_path
-                configs.append((mod_name, file, profile_path))
-        
-        # Check SubModule.xml for explicit config paths
-        for mod in self._organizer.modList().allMods():
-            mod_path = Path(self._organizer.modList().getMod(mod).absolutePath())
-            submodule_xml = mod_path / "SubModule.xml"
-            if submodule_xml.exists():
-                try:
-                    tree = ET.parse(submodule_xml)
-                    config_nodes = tree.findall(".//ConfigFile")
-                    for node in config_nodes:
-                        config_path = node.get("path")
-                        if config_path:
-                            full_path = docs_path / config_path
-                            if full_path.exists():
-                                mod_name = mod
-                                relative_path = full_path.relative_to(docs_path)
-                                profile_path = profile_configs_path / relative_path
-                                configs.append((mod_name, full_path, profile_path))
-                except Exception as e:
-                    logger.error(f"Failed to parse SubModule.xml for {mod}: {str(e)}")
-        
+                profile_file = profile_path / relative_path
+                configs.append((file, profile_file))
+                self._file_timestamps[str(file)] = file.stat().st_mtime
+                logging.debug(f"Found config: {file} -> Profile: {profile_file}")
+
+        # Check profile configs to include files not in game directory
+        for profile_file in profile_path.rglob("*"):
+            if (profile_file.suffix.lower() in config_extensions and
+                any(folder in profile_file.parts for folder in known_folders) and
+                profile_file.name not in excluded_files):
+                # Validate JSON files
+                if profile_file.suffix.lower() == ".json":
+                    try:
+                        with open(profile_file, "r", encoding="utf-8-sig") as f:
+                            json.load(f)
+                        logging.debug(f"Valid JSON profile config: {profile_file}")
+                    except json.JSONDecodeError as e:
+                        logging.warning(f"Invalid JSON profile config: {profile_file} - Error: {e}")
+                        continue
+                relative_path = profile_file.relative_to(profile_path)
+                game_file = docs_path / relative_path
+                if (game_file, profile_file) not in configs:
+                    configs.append((game_file, profile_file))
+                    self._file_timestamps[str(game_file)] = game_file.stat().st_mtime if game_file.exists() else 0
+                    logging.debug(f"Found profile-only config: {game_file} -> Profile: {profile_file}")
+
         return configs
 
-    def _get_mod_name(self, file: Path) -> str:
-        parts = file.parts
-        if "Modules" in parts:
-            module_idx = parts.index("Modules")
-            if module_idx + 1 < len(parts):
-                return parts[module_idx + 1]
-        return file.parent.name
+    def _load_configs(self):
+        logging.info("ModConfigManagerWidget: Loading config files")
+        self._config_tree.clear()
+        configs = self._find_mod_configs()
+        profile_path = Path(self._organizer.profilePath()) / "mod_configs"
 
-    def _refresh_configs(self):
-        try:
-            logger.info("ModConfigManagerWidget: Refreshing config files")
-            self._config_tree.clear()
-            self._editor.clear()
-            self._save_button.setEnabled(False)
-            configs = self._find_mod_configs()
-            
-            for mod_name, orig_path, profile_path in configs:
-                if not profile_path.exists() and orig_path.exists():
-                    profile_path.parent.mkdir(parents=True, exist_ok=True)
-                    shutil.copy(orig_path, profile_path)
-                    logger.info(f"Copied {orig_path} to {profile_path}")
-                
-                item = QTreeWidgetItem(self._config_tree)
-                item.setText(0, mod_name)
-                item.setText(1, str(orig_path))
-                item.setText(2, str(profile_path))
-                item.setData(0, Qt.ItemDataRole.UserRole, str(profile_path))
-            
-            logger.info(f"ModConfigManagerWidget: Loaded {len(configs)} config files")
-        except Exception as e:
-            logger.error(f"ModConfigManagerWidget: Failed to refresh configs: {str(e)}")
-            QMessageBox.critical(self, "Error", f"Failed to refresh configs: {str(e)}")
+        for orig_path, profile_file in configs:
+            # Initialize profile file if it doesn't exist
+            if orig_path.exists() and not profile_file.exists():
+                profile_file.parent.mkdir(parents=True, exist_ok=True)
+                if orig_path.suffix.lower() == ".json":
+                    try:
+                        with open(orig_path, "r", encoding="utf-8-sig") as f:
+                            json.load(f)
+                        shutil.copyfile(orig_path, profile_file)
+                        logging.info(f"Initialized profile config: {profile_file}")
+                    except json.JSONDecodeError as e:
+                        logging.warning(f"Skipped copying invalid JSON config: {orig_path} - Error: {e}")
+                else:
+                    shutil.copyfile(orig_path, profile_file)
+                    logging.info(f"Initialized profile config: {profile_file}")
 
-    def _load_config(self, item: QTreeWidgetItem, column: int):
-        try:
-            self._current_config_path = Path(item.data(0, Qt.ItemDataRole.UserRole))
-            if not self._current_config_path.exists():
-                self._editor.setPlainText("File not found in profile directory.")
-                self._save_button.setEnabled(False)
-                return
-            
-            with open(self._current_config_path, "r", encoding="utf-8") as f:
-                content = f.read()
-            
-            self._editor.setPlainText(content)
-            file_type = self._current_config_path.suffix.lower()[1:]  # Remove dot
-            self._highlighter = ConfigHighlighter(self._editor.document(), file_type)
-            self._save_button.setEnabled(True)
-            logger.info(f"Loaded config: {self._current_config_path}")
-        except Exception as e:
-            logger.error(f"Failed to load config {self._current_config_path}: {str(e)}")
-            QMessageBox.critical(self, "Error", f"Failed to load config: {str(e)}")
+            item = QTreeWidgetItem(self._config_tree)
+            item.setText(0, orig_path.name)
+            item.setText(1, str(profile_file.relative_to(profile_path)))
+            item.setToolTip(0, str(orig_path))
+            item.setToolTip(1, str(profile_file))
+            item.setData(0, Qt.ItemDataRole.UserRole, str(profile_file))
 
-    def _on_text_changed(self):
-        self._save_button.setEnabled(bool(self._current_config_path and self._editor.toPlainText()))
+        logging.info(f"ModConfigManagerWidget: Loaded {len(configs)} config files")
+        self._update_status()
 
-    def _save_config(self):
-        try:
-            if not self._current_config_path:
-                QMessageBox.warning(self, "Warning", "No config file selected")
-                return
-            
-            content = self._editor.toPlainText()
-            file_type = self._current_config_path.suffix.lower()[1:]
-            
-            # Basic validation
-            if file_type == "json":
-                try:
-                    json.loads(content)
-                except json.JSONDecodeError as e:
-                    QMessageBox.warning(self, "Invalid JSON", f"JSON validation failed: {str(e)}")
-                    return
-            elif file_type == "xml":
-                try:
-                    ET.fromstring(content)
-                except ET.ParseError as e:
-                    QMessageBox.warning(self, "Invalid XML", f"XML validation failed: {str(e)}")
-                    return
-            
-            # Backup before saving
-            backup_path = self._current_config_path.with_suffix(".bak")
-            if self._current_config_path.exists():
-                shutil.copy(self._current_config_path, backup_path)
-            
-            with open(self._current_config_path, "w", encoding="utf-8") as f:
-                f.write(content)
-            logger.info(f"Saved config: {self._current_config_path}")
-            QMessageBox.information(self, "Success", f"Saved changes to {self._current_config_path}")
-        except Exception as e:
-            logger.error(f"Failed to save config {self._current_config_path}: {str(e)}")
-            QMessageBox.critical(self, "Error", f"Failed to save config: {str(e)}")
-
-    def _restore_original(self):
-        try:
-            selected = self._config_tree.selectedItems()
-            if not selected:
-                QMessageBox.warning(self, "Warning", "No config file selected")
-                return
-            
-            item = selected[0]
-            orig_path = Path(item.text(1))
-            profile_path = Path(item.data(0, Qt.ItemDataRole.UserRole))
-            
-            if orig_path.exists():
-                profile_path.parent.mkdir(parents=True, exist_ok=True)
-                shutil.copy(orig_path, profile_path)
-                logger.info(f"Restored {orig_path} to {profile_path}")
-                QMessageBox.information(self, "Success", f"Restored config to {profile_path}")
-                self._load_config(item, 0)  # Reload the restored file
-            else:
-                QMessageBox.warning(self, "Error", f"Original file not found: {orig_path}")
-        except Exception as e:
-            logger.error(f"Failed to restore config: {str(e)}")
-            QMessageBox.critical(self, "Error", f"Failed to restore config: {str(e)}")
+    def _update_button_state(self):
+        selected = len(self._config_tree.selectedItems()) > 0
+        self._open_button.setEnabled(selected)
 
     def _open_external(self):
+        selected_items = self._config_tree.selectedItems()
+        if not selected_items:
+            logging.warning("ModConfigManagerWidget: No config file selected for opening")
+            return
+
+        item = selected_items[0]
+        profile_path = Path(item.data(0, Qt.ItemDataRole.UserRole))
+
         try:
-            if not self._current_config_path or not self._current_config_path.exists():
-                QMessageBox.warning(self, "Warning", "No config file selected or file not found")
+            if not profile_path.exists():
+                logging.warning(f"ModConfigManagerWidget: Profile config does not exist: {profile_path}")
+                QMessageBox.warning(self, "File Not Found", f"Config file not found: {profile_path}")
                 return
-            QDesktopServices.openUrl(QUrl.fromLocalFile(str(self._current_config_path)))
-            logger.info(f"Opened {self._current_config_path} in external editor")
+
+            # Validate JSON before opening
+            if profile_path.suffix.lower() == ".json":
+                try:
+                    with open(profile_path, "r", encoding="utf-8-sig") as f:
+                        json.load(f)
+                    logging.debug(f"ModConfigManagerWidget: Valid JSON before opening: {profile_path}")
+                except json.JSONDecodeError as e:
+                    logging.error(f"ModConfigManagerWidget: Cannot open invalid JSON config: {profile_path} - Error: {e}")
+                    QMessageBox.critical(self, "Invalid JSON", f"Cannot open invalid JSON file: {e}")
+                    return
+
+            logging.info(f"ModConfigManagerWidget: Opening profile config in external editor: {profile_path}")
+            QDesktopServices.openUrl(QUrl.fromLocalFile(str(profile_path)))
         except Exception as e:
-            logger.error(f"Failed to open {self._current_config_path} externally: {str(e)}")
-            QMessageBox.critical(self, "Error", f"Failed to open externally: {str(e)}")
+            logging.error(f"ModConfigManagerWidget: Failed to open {profile_path}: {str(e)}")
+            QMessageBox.critical(self, "Open Error", f"Failed to open config file: {str(e)}")
+
+    def _clear_game_configs(self, excluded_dirs: set = None):
+        """Clear all config files in the game directory, except those in excluded directories."""
+        try:
+            docs_path = Path(QDir(QStandardPaths.writableLocation(QStandardPaths.StandardLocation.DocumentsLocation)).filePath("Mount and Blade II Bannerlord/Configs"))
+            config_extensions = {".xml", ".json", ".ini"}
+            excluded_files = {"engine_config.txt", "BannerlordConfig.txt", "LauncherData.xml"}
+            known_folders = {"Configs", "Config", "Modules", "ModSettings"}
+            excluded_dirs = excluded_dirs or set()
+
+            cleared = 0
+            for file in docs_path.rglob("*"):
+                if (file.suffix.lower() in config_extensions and
+                    any(folder in file.parts for folder in known_folders) and
+                    file.name not in excluded_files and
+                    not any(excluded_dir in file.parts for excluded_dir in excluded_dirs)):
+                    file.unlink()
+                    cleared += 1
+                    logging.debug(f"ModConfigManagerWidget: Cleared game config: {file}")
+            logging.info(f"ModConfigManagerWidget: Cleared {cleared} config files from game directory")
+        except Exception as e:
+            logging.error(f"ModConfigManagerWidget: Failed to clear game configs: {str(e)}")
+
+    def sync_to_game(self, force: bool = False):
+        """Copy profile configs to game directory, optionally forcing the sync."""
+        try:
+            logging.info("ModConfigManagerWidget: Syncing profile configs to game directory")
+            configs = self._find_mod_configs()
+            docs_path = Path(QDir(QStandardPaths.writableLocation(QStandardPaths.StandardLocation.DocumentsLocation)).filePath("Mount and Blade II Bannerlord/Configs"))
+            profile_path = Path(self._organizer.profilePath()) / "mod_configs"
+            synced = 0
+
+            # Clear game config directory to prevent overlap from previous profiles
+            if force:
+                self._clear_game_configs()
+
+            for orig_path, profile_file in configs:
+                # Initialize profile file if it doesn't exist and force is True
+                if force and orig_path.exists() and not profile_file.exists():
+                    profile_file.parent.mkdir(parents=True, exist_ok=True)
+                    if orig_path.suffix.lower() == ".json":
+                        try:
+                            with open(orig_path, "r", encoding="utf-8-sig") as f:
+                                json.load(f)
+                            shutil.copyfile(orig_path, profile_file)
+                            logging.info(f"ModConfigManagerWidget: Initialized profile config: {profile_file}")
+                        except json.JSONDecodeError as e:
+                            logging.warning(f"ModConfigManagerWidget: Skipped copying invalid JSON config: {orig_path} - Error: {e}")
+                            continue
+                    else:
+                        shutil.copyfile(orig_path, profile_file)
+                        logging.info(f"ModConfigManagerWidget: Initialized profile config: {profile_file}")
+
+                # Sync profile file to game directory
+                if profile_file.exists():
+                    profile_mtime = profile_file.stat().st_mtime
+                    orig_mtime = orig_path.stat().st_mtime if orig_path.exists() else 0
+                    if force or profile_mtime > orig_mtime + 1:  # Allow 1-second tolerance
+                        if profile_file.suffix.lower() == ".json":
+                            try:
+                                with open(profile_file, "r", encoding="utf-8-sig") as f:
+                                    json.load(f)
+                            except json.JSONDecodeError as e:
+                                logging.warning(f"ModConfigManagerWidget: Skipping invalid JSON profile config: {profile_file} - Error: {e}")
+                                continue
+                        orig_path.parent.mkdir(parents=True, exist_ok=True)
+                        shutil.copyfile(profile_file, orig_path)
+                        self._file_timestamps[str(orig_path)] = orig_path.stat().st_mtime
+                        logging.info(f"ModConfigManagerWidget: Synced profile config to game: {profile_file} -> {orig_path}")
+                        synced += 1
+            logging.info(f"ModConfigManagerWidget: Synced {synced} configs to game directory")
+            self._load_configs()
+            if synced > 0:
+                logging.debug(f"ModConfigManagerWidget: Synced {synced} configs, updating UI")
+        except Exception as e:
+            logging.error(f"ModConfigManagerWidget: Failed to sync to game directory: {str(e)}")
+            QMessageBox.critical(self, "Sync Error", f"Failed to sync configs to game directory: {str(e)}")
+
+    def sync_to_profile(self):
+        """Copy modified game configs to profile directory."""
+        try:
+            logging.info("ModConfigManagerWidget: Syncing game configs to profile")
+            configs = self._find_mod_configs()
+            docs_path = Path(QDir(QStandardPaths.writableLocation(QStandardPaths.StandardLocation.DocumentsLocation)).filePath("Mount and Blade II Bannerlord/Configs"))
+            profile_path = Path(self._organizer.profilePath()) / "mod_configs"
+            synced = 0
+
+            for orig_path, profile_file in configs:
+                if orig_path.exists():
+                    orig_mtime = orig_path.stat().st_mtime
+                    profile_mtime = profile_file.stat().st_mtime if profile_file.exists() else 0
+                    if orig_mtime > profile_mtime + 1:  # Allow 1-second tolerance
+                        if orig_path.suffix.lower() == ".json":
+                            try:
+                                with open(orig_path, "r", encoding="utf-8-sig") as f:
+                                    json.load(f)
+                            except json.JSONDecodeError as e:
+                                logging.warning(f"ModConfigManagerWidget: Skipping invalid JSON game config: {orig_path} - Error: {e}")
+                                continue
+                        profile_file.parent.mkdir(parents=True, exist_ok=True)
+                        shutil.copyfile(orig_path, profile_file)
+                        self._file_timestamps[str(orig_path)] = orig_mtime
+                        logging.info(f"ModConfigManagerWidget: Synced game config to profile: {orig_path} -> {profile_file}")
+                        synced += 1
+            logging.info(f"ModConfigManagerWidget: Synced {synced} configs to profile")
+            self._load_configs()
+            if synced > 0:
+                logging.debug(f"ModConfigManagerWidget: Synced {synced} configs to profile, updating UI")
+        except Exception as e:
+            logging.error(f"ModConfigManagerWidget: Failed to sync to profile: {str(e)}")
+            QMessageBox.critical(self, "Sync Error", f"Failed to sync configs to profile: {str(e)}")
+
+    def _update_status(self):
+        """Update the status label based on config sync state."""
+        try:
+            if self._configs_in_sync():
+                self._status_label.setText("Configs Synced")
+                self._status_label.setToolTip("Profile and game configurations are synchronized")
+                logging.debug("ModConfigManagerWidget: Status updated to Configs Synced")
+            else:
+                self._status_label.setText("Manual Edit Detected")
+                self._status_label.setToolTip("Changes detected in profile or game configurations")
+                logging.debug("ModConfigManagerWidget: Status updated to Manual Edit Detected")
+        except Exception as e:
+            logging.error(f"ModConfigManagerWidget: Failed to update status: {str(e)}")
+
+    def _configs_in_sync(self) -> bool:
+        """Check if profile and game config directories are in sync."""
+        try:
+            docs_path = Path(QDir(QStandardPaths.writableLocation(QStandardPaths.StandardLocation.DocumentsLocation)).filePath("Mount and Blade II Bannerlord/Configs"))
+            profile_path = Path(self._organizer.profilePath()) / "mod_configs"
+            if not profile_path.exists() or not docs_path.exists():
+                logging.debug("ModConfigManagerWidget: One or both config directories missing, assuming synced")
+                return True
+            profile_files = {f for f in profile_path.rglob("*") if f.is_file() and f.suffix.lower() in {".xml", ".json", ".ini"}}
+            game_files = {f for f in docs_path.rglob("*") if f.is_file() and f.suffix.lower() in {".xml", ".json", ".ini"}}
+            common_files = {(f.relative_to(profile_path) if f.is_relative_to(profile_path) else f.relative_to(docs_path)) for f in profile_files.intersection(game_files)}
+            for rel_path in common_files:
+                profile_file = profile_path / rel_path
+                game_file = docs_path / rel_path
+                if not self._compare_files(profile_file, game_file):
+                    logging.debug(f"ModConfigManagerWidget: Mismatch detected between {profile_file} and {game_file}")
+                    return False
+            logging.debug("ModConfigManagerWidget: All common config files are in sync")
+            return True
+        except Exception as e:
+            logging.error(f"ModConfigManagerWidget: Failed to check config sync: {str(e)}")
+            return True  # Default to True to avoid false positives
+
+    def _compare_files(self, file1: Path, file2: Path) -> bool:
+        """Compare two files for equality."""
+        try:
+            with open(file1, 'rb') as f1, open(file2, 'rb') as f2:
+                return f1.read() == f2.read()
+        except Exception as e:
+            logging.error(f"ModConfigManagerWidget: Failed to compare files {file1} and {file2}: {str(e)}")
+            return False
