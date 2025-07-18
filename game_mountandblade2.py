@@ -2,11 +2,12 @@ import sys
 import os
 import json
 from pathlib import Path
-import xml.etree.ElementTree as ET
-from PyQt6.QtCore import QDir, QFileInfo, QStandardPaths, Qt
+from typing import List, Mapping
+from PyQt6.QtCore import QDir, QFileInfo, QStandardPaths, Qt, qInfo, qWarning, qCritical
 from PyQt6.QtWidgets import QMainWindow, QTabWidget, QWidget
 import mobase
 import logging
+import xml.etree.ElementTree as ET
 from collections.abc import Mapping
 from enum import IntEnum
 
@@ -182,7 +183,8 @@ class MountAndBladeIIGame(BasicGame):
         "Game:-Mount-&-Blade-II:-Bannerlord"
     )
 
-    GameBinary = "bin/Win64_Shipping_Client/TaleWorlds.MountAndBlade.Launcher.exe"
+    GameBinary = "bin/Win64_Shipping_Client/Bannerlord.exe"
+    GameLauncher = "bin/Win64_Shipping_Client/TaleWorlds.MountAndBlade.Launcher.exe"
     GameDocumentsDirectory = "%DOCUMENTS%/Mount and Blade II Bannerlord/Configs"
     GameSaveExtension = "sav"
     GameSavesDirectory = "%DOCUMENTS%/Mount and Blade II Bannerlord/Game Saves"
@@ -210,7 +212,7 @@ class MountAndBladeIIGame(BasicGame):
             try:
                 logging.info("MountAndBladeIIGame: Registering UI and run callbacks")
                 organizer.onUserInterfaceInitialized(self.init_tab)
-                organizer.onAboutToRun(self._pre_run_sync)
+                organizer.onAboutToRun(self._onAboutToRun)
                 organizer.onFinishedRun(self._post_run_sync)
                 organizer.onProfileChanged(self._on_profile_changed)
             except Exception as e:
@@ -221,30 +223,169 @@ class MountAndBladeIIGame(BasicGame):
             logging.error(f"MountAndBladeIIGame: Initialization failed: {str(e)}")
             return False
 
-    def _pre_run_sync(self, appName: str) -> bool:
-        """Sync profile configs to game directory and set CLI arguments for Bannerlord.exe before game launch."""
-        try:
-            logging.info(f"MountAndBladeIIGame: Pre-run sync for {appName}")
-            if hasattr(self, '_config_tab'):
-                self._config_tab.sync_to_game(force=True)
-            else:
-                logging.warning("MountAndBladeIIGame: Config tab not initialized, skipping sync")
+    def settings(self) -> list[mobase.PluginSetting]:
+        return [
+            mobase.PluginSetting(
+                "enforce_load_order",
+                "Enforce mod load order via CLI arguments for Bannerlord.exe",
+                True
+            )
+        ]
 
-            if appName.lower().endswith("bannerlord.exe") and hasattr(self, '_submodule_tab') and self._submodule_tab:
-                load_order = self._submodule_tab.get_enabled_load_order()
-                if load_order:
-                    cli_arg = f"/singleplayer _MODULES_*{'*'.join(load_order)}*_MODULES_"
-                    logging.info(f"MountAndBladeIIGame: Setting CLI arguments for Bannerlord.exe: {cli_arg}")
-                    # Update the executable arguments in MO2
-                    for exe in self.executables():
-                        if exe.title() == "Mount & Blade II: Bannerlord":
-                            exe.withArgument(cli_arg)
-                            break
+    def _get_enabled_mods(self) -> List[str]:
+        """Get enabled mods in profile priority order."""
+        mod_list = self._organizer.modList()
+        mods = mod_list.allModsByProfilePriority()
+        enabled_mods = [mod for mod in mods if mod_list.state(mod) & mobase.ModState.ACTIVE]
+        logging.info(f"MountAndBladeIIGame: Enabled mods: {enabled_mods}")
+        return enabled_mods
+
+    def _get_mod_load_order(self) -> List[str]:
+        """Retrieve mod load order, preferring SubModuleTabWidget if available."""
+        if self._submodule_tab is not None:
+            load_order = self._submodule_tab.get_enabled_load_order()
+            if load_order:
+                logging.info(f"MountAndBladeIIGame: Retrieved load order from SubModuleTabWidget: {load_order}")
+                return load_order
+        
+        # Fallback to parsing SubModule.xml files
+        load_order = []
+        try:
+            enabled_mods = self._get_enabled_mods()
+            game_path = Path(self._gamePath)
+            for mod in enabled_mods:
+                # Check MO2 mod directory
+                mod_path = Path(self._organizer.getMod(mod).absolutePath()) / "SubModule.xml"
+                if mod_path.exists() and mod_path.stat().st_size > 0:
+                    try:
+                        tree = ET.parse(mod_path)
+                        root = tree.getroot()
+                        module_id = root.find(".//Id[@value]")
+                        if module_id is not None and module_id.get("value"):
+                            load_order.append(module_id.get("value"))
+                            logging.debug(f"MountAndBladeIIGame: Added mod {mod} with ID {module_id.get('value')}")
+                        else:
+                            logging.warning(f"MountAndBladeIIGame: No Id tag found in SubModule.xml for mod {mod}")
+                    except (ET.ParseError, AttributeError) as e:
+                        logging.warning(f"MountAndBladeIIGame: Failed to parse SubModule.xml for mod {mod}: {str(e)}")
                 else:
-                    logging.warning("MountAndBladeIIGame: No enabled mods found for CLI arguments")
-            return True
+                    # Check native module directory
+                    native_mod_path = game_path / "Modules" / mod / "SubModule.xml"
+                    if native_mod_path.exists() and native_mod_path.stat().st_size > 0:
+                        try:
+                            tree = ET.parse(native_mod_path)
+                            root = tree.getroot()
+                            module_id = root.find(".//Id[@value]")
+                            if module_id is not None and module_id.get("value"):
+                                load_order.append(module_id.get("value"))
+                                logging.debug(f"MountAndBladeIIGame: Added native mod {mod} with ID {module_id.get('value')}")
+                            else:
+                                logging.warning(f"MountAndBladeIIGame: No Id tag found in SubModule.xml for native mod {mod}")
+                        except (ET.ParseError, AttributeError) as e:
+                            logging.warning(f"MountAndBladeIIGame: Failed to parse SubModule.xml for native mod {mod}: {str(e)}")
+                    else:
+                        logging.warning(f"MountAndBladeIIGame: SubModule.xml not found or empty for mod {mod}")
+
+            # Ensure core modules
+            core_modules = ["Native", "SandBoxCore", "BirthAndDeath", "CustomBattle", "Sandbox", "StoryMode"]
+            for core_mod in core_modules:
+                if core_mod not in load_order:
+                    mod_path = game_path / "Modules" / core_mod / "SubModule.xml"
+                    if mod_path.exists():
+                        load_order.append(core_mod)
+                        logging.debug(f"MountAndBladeIIGame: Added core module {core_mod}")
+
+            # Sort based on dependencies
+            sorted_load_order = self._sort_load_order(load_order)
+            logging.info(f"MountAndBladeIIGame: Retrieved and sorted load order: {sorted_load_order}")
+            return sorted_load_order
         except Exception as e:
-            logging.error(f"MountAndBladeIIGame: Pre-run sync failed: {str(e)}")
+            logging.error(f"MountAndBladeIIGame: Failed to get load order: {str(e)}")
+            return []
+
+    def _sort_load_order(self, load_order: List[str]) -> List[str]:
+        """Sort load order based on SubModule.xml dependencies."""
+        dependencies = {}
+        game_path = Path(self._gamePath)
+        mod_paths = {mod: Path(self._organizer.getMod(mod).absolutePath()) if mod in self._organizer.modList().allMods()
+                     else game_path / "Modules" / mod for mod in load_order}
+
+        for mod in load_order:
+            mod_path = mod_paths[mod] / "SubModule.xml"
+            if mod_path.exists():
+                try:
+                    tree = ET.parse(mod_path)
+                    root = tree.getroot()
+                    deps = []
+                    for dep in root.findall(".//DependedModule[@Id]"):
+                        dep_id = dep.get("Id")
+                        if dep_id in load_order:
+                            deps.append(dep_id)
+                    dependencies[mod] = deps
+                    logging.debug(f"MountAndBladeIIGame: Dependencies for {mod}: {deps}")
+                except ET.ParseError as e:
+                    logging.warning(f"MountAndBladeIIGame: Failed to parse SubModule.xml for {mod} during sorting: {str(e)}")
+                    dependencies[mod] = []
+            else:
+                dependencies[mod] = []
+                logging.warning(f"MountAndBladeIIGame: SubModule.xml not found for {mod} during sorting")
+
+        # Topological sort
+        sorted_order = []
+        visited = set()
+        def dfs(mod):
+            if mod in visited:
+                return
+            visited.add(mod)
+            for dep in dependencies.get(mod, []):
+                dfs(dep)
+            sorted_order.append(mod)
+
+        for mod in load_order:
+            dfs(mod)
+        return sorted_order
+
+    def _onAboutToRun(self, app_path_str: str, wd: QDir, args: str) -> bool:
+        """Handle game launch with custom CLI arguments, preventing infinite loop."""
+        if not self.isActive():
+            qInfo("MountAndBladeIIGame: Plugin not active, allowing default launch")
+            return True
+
+        app_path = Path(app_path_str)
+        exe_path = Path(self.gameDirectory().absolutePath(), self.binaryName())
+        if app_path != exe_path:
+            qInfo(f"MountAndBladeIIGame: Skipping non-Bannerlord executable: {app_path}")
+            return True
+
+        try:
+            if not self._organizer.pluginSetting(self.name(), "enforce_load_order"):
+                qInfo("MountAndBladeIIGame: Load order enforcement disabled, using default launch")
+                return True
+
+            if "--mo2-processed" in args:
+                qInfo("MountAndBladeIIGame: Already processed, proceeding with launch")
+                return True
+
+            # Get load order from SubModuleTabWidget
+            if self._submodule_tab is None:
+                qWarning("MountAndBladeIIGame: SubModuleTabWidget not initialized, falling back to default launch")
+                return True
+            load_order = self._submodule_tab.get_enabled_load_order()
+            if not load_order:
+                qWarning("MountAndBladeIIGame: Load order is empty, falling back to default launch")
+                return True
+
+            # Construct CLI arguments as a list
+            load_order_str = '*'.join(load_order)
+            cli_args = ["/singleplayer", f"_MODULES_*{load_order_str}*_MODULES_", "--mo2-processed"]
+            qInfo(f"MountAndBladeIIGame: Launching {exe_path} with args: {cli_args}")
+
+            # Launch with custom arguments
+            result = self._organizer.startApplication(str(exe_path), cli_args)
+            qInfo(f"MountAndBladeIIGame: Application started with result: {result}")
+            return False  # Prevent default launch
+        except Exception as e:
+            qCritical(f"MountAndBladeIIGame: Failed in _onAboutToRun: {str(e)}")
             return True
 
     def _post_run_sync(self, appName: str, result: int):
@@ -349,12 +490,12 @@ class MountAndBladeIIGame(BasicGame):
             bin_path = game_path.absoluteFilePath("bin/Win64_Shipping_Client")
             executables = [
                 mobase.ExecutableInfo(
-                    "Mount & Blade II: Bannerlord (Launcher)",
-                    QFileInfo(QDir(bin_path), "TaleWorlds.MountAndBlade.Launcher.exe")
-                ).withWorkingDirectory(bin_path),
-                mobase.ExecutableInfo(
                     "Mount & Blade II: Bannerlord",
                     QFileInfo(QDir(bin_path), "Bannerlord.exe")
+                ).withWorkingDirectory(bin_path).withArgument("/singleplayer"),
+                mobase.ExecutableInfo(
+                    "Mount & Blade II: Bannerlord (Launcher)",
+                    QFileInfo(QDir(bin_path), "TaleWorlds.MountAndBlade.Launcher.exe")
                 ).withWorkingDirectory(bin_path),
                 mobase.ExecutableInfo(
                     "Mount & Blade II: Bannerlord (Native)",
