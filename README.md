@@ -20,20 +20,24 @@ This plugin extends [Mod Organizer 2 (MO2)](https://www.modorganizer.org/) to pr
   - `_find_mod_configs()`: Discovers and lists valid config files, excluding `engine_config.txt`, `BannerlordConfig.txt`, and `LauncherData.xml`.
 
 ### Game Integration (`game_mountandblade2.py`)
-- **Purpose**: Integrates *Mount & Blade II: Bannerlord* into MO2 as a managed game, handling executables, saves, and mod data.
+- **Purpose**: Integrates *Mount & Blade II: Bannerlord* into MO2 as a managed game, handling executables, saves, mods, and CLI load order passthrough.
 - **Functionality**:
   - Defines four game executables: Launcher (`TaleWorlds.MountAndBlade.Launcher.exe`), Main (`Bannerlord.exe`), Native (`Bannerlord.Native.exe`), and Singleplayer (`TaleWorlds.MountAndBlade.Launcher.Singleplayer.exe`).
-  - Manages save games (`.sav` files) in `%DOCUMENTS%/Mount and Blade II Bannerlord/Game Saves/`, parsing metadata like character name, level, and gold.
+  - Manages save games (`.sav` files) in `%DOCUMENTS%/Mount and Blade II Bannerlord/Game Saves/`, parsing metadata like character name, level, gold, file size, and date.
   - Validates mod folders (e.g., `native`, `sandbox`) and checks for `SubModule.xml` using `MountAndBladeIIModDataChecker`.
-  - Identifies mod content (e.g., asset packs, DLLs, configs, scenes) via `BannerlordModDataContent` for MO2’s mod data view.
-  - Registers callbacks for UI initialization (`init_tab`), pre-run sync (`_pre_run_sync`), post-run sync (`_post_run_sync`), and profile changes (`_on_profile_changed`).
+  - Identifies mod content (e.g., `tpac` for asset packs, `dll` for DLLs, `json` for configs, `xscene` for scenes, `ogg` for music, `settlements_distance_cache.bin` for custom maps) via `BannerlordModDataContent` for MO2’s mod data view.
+  - Registers callbacks for UI initialization (`init_tab`), pre-run sync (`_onAboutToRun`), post-run sync (`_post_run_sync`), and profile changes (`_on_profile_changed`).
   - Initializes **SubModules** and **Mod Configs** tabs in MO2’s UI.
+  - **CLI Load Order Passthrough**: Bypasses the Bannerlord launcher by launching `bin/Win64_Shipping_Client/Bannerlord.exe` with `/singleplayer _MODULES_*Native*SandBoxCore*CustomBattle*Sandbox*StoryMode*MOD1*MOD2*...*_MODULES_`. Sources load order from `SubModuleTabWidget` or parses `SubModule.xml` files in `V:\test1\mods\<mod_name>\<module_name>\SubModule.xml`, mapped to `s:\steam\steamapps\common\Mount & Blade II Bannerlord\Modules\<module_name>` via MO2’s VFS. Sorts mods using `DependedModule` tags for dependency order, enabled via `enforce_load_order` setting.
 - **Key Methods**:
-  - `executables()`: Returns a list of `mobase.ExecutableInfo` objects for game executables.
+  - `executables()`: Returns a list of `mobase.ExecutableInfo` objects for game executables, with `/singleplayer` for `Bannerlord.exe`.
   - `init_tab()`: Adds **SubModules** and **Mod Configs** tabs to MO2’s UI.
-  - `listSaves()`: Lists save files with metadata parsing.
-  - `_pre_run_sync()`: Syncs configs before game launch.
+  - `listSaves()`: Lists save files with metadata parsing for character name, level, gold, etc.
+  - `_onAboutToRun()`: Constructs CLI arguments with load order from `SubModuleTabWidget` or `SubModule.xml`, preventing default launch.
   - `_post_run_sync()`: Syncs game configs to profile after game exit.
+  - `_on_profile_changed()`: Refreshes profile-specific configs, with fixes for `NoneType` errors and loop prevention.
+  - `_get_mod_load_order()`: Fallback for parsing `SubModule.xml` to extract module IDs.
+  - `_sort_load_order()`: Topologically sorts mods based on `DependedModule` tags.
 
 ### Submodule Management (`submodule_tab.py`)
 - **Purpose**: Provides a UI for managing *Mount & Blade II: Bannerlord* submodules (mod DLLs) within MO2.
