@@ -88,7 +88,11 @@ class ModConfigManagerWidget(QWidget):
 
     def refresh_on_profile_change(self):
         """Refresh configs when profile changes and force sync to game directory."""
+        if hasattr(self, '_refreshing') and self._refreshing:
+            logging.debug("ModConfigManagerWidget: Skipping refresh due to re-entrant call")
+            return
         try:
+            self._refreshing = True  # Set guard
             new_profile_path = Path(self._organizer.profilePath())
             if new_profile_path != self._current_profile_path:
                 logging.info(f"ModConfigManagerWidget: Profile changed to {new_profile_path}")
@@ -99,10 +103,18 @@ class ModConfigManagerWidget(QWidget):
                 # Update watcher for new profile's mod_configs directory
                 profile_configs = Path(self._organizer.profilePath()) / "mod_configs"
                 if profile_configs.exists():
+                    # Remove existing paths to avoid duplicate watching
+                    for path in self._file_watcher.directories():
+                        if path != str(profile_configs):
+                            self._file_watcher.removePath(path)
                     self._file_watcher.addPath(str(profile_configs))
                     logging.info(f"ModConfigManagerWidget: Added watcher for {profile_configs}")
+            else:
+                logging.debug("ModConfigManagerWidget: Profile path unchanged, skipping refresh")
         except Exception as e:
             logging.error(f"ModConfigManagerWidget: Failed to refresh on profile change: {str(e)}")
+        finally:
+            self._refreshing = False  # Clear guard
 
     def _find_mod_configs(self) -> list[tuple[Path, Path]]:
         configs = []

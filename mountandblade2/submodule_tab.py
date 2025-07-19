@@ -82,7 +82,7 @@ class SubModuleTabWidget(QWidget):
         self.refresh_mods()
         
     def get_enabled_load_order(self) -> list[str]:
-        """Return the list of enabled mod IDs in their current order, excluding Multiplayer for singleplayer mode."""
+        """Return the list of enabled mod IDs in their current order."""
         try:
             logger.debug("SubModuleTabWidget: Retrieving enabled load order")
             load_order = []
@@ -90,7 +90,7 @@ class SubModuleTabWidget(QWidget):
                 item = self._mod_list.item(i)
                 if item and item.checkState() == Qt.CheckState.Checked:
                     mod_id = item.data(Qt.ItemDataRole.UserRole)
-                    if mod_id and mod_id != "Multiplayer":
+                    if mod_id:
                         load_order.append(mod_id)
             logger.debug(f"SubModuleTabWidget: Enabled load order: {load_order}")
             # Debug: Write load order to a file
@@ -433,10 +433,21 @@ class SubModuleTabWidget(QWidget):
 
     def _compare_versions(self, mod_version: str, dep_version: str, mod_id: str, dep_id: str) -> bool:
         try:
+            # Handle wildcard version
+            if dep_version.strip().endswith(".*") or dep_version.strip() == "*":
+                logger.debug(
+                    f"SubModuleTabWidget: Wildcard version for {mod_id} vs {dep_id} ({dep_version}), assuming compatible")
+                return True
+
+            # Parse version strings
             mod_parts = [int(x) for x in mod_version.lstrip("ve").split(".")]
             dep_parts = [int(x) for x in dep_version.lstrip("ve").split(".")]
+
+            # Normalize version parts to 4 components
             mod_parts += [0] * (4 - len(mod_parts))
             dep_parts += [0] * (4 - len(dep_parts))
+
+            # Compare version components
             for m, d in zip(mod_parts, dep_parts):
                 if m < d:
                     return False
@@ -444,8 +455,10 @@ class SubModuleTabWidget(QWidget):
                     return True
             return True
         except (ValueError, AttributeError):
-            logger.warning(f"SubModuleTabWidget: Invalid version comparison for {mod_id} ({mod_version}) vs {dep_id} ({dep_version})")
-            return False
+            # Log only if the version format is unexpected and not a wildcard
+            logger.debug(
+                f"SubModuleTabWidget: Could not compare versions for {mod_id} ({mod_version}) vs {dep_id} ({dep_version}), assuming compatible")
+            return True
 
     def _build_dependency_graph(self, mod_data: List[Dict], enabled_mods: list[str], disabled_mods: list[str]) -> Tuple[Dict[str, List[Tuple[str, str, bool, str]]], List[str]]:
         cache_key = tuple(sorted([mod["id"] for mod in mod_data]))

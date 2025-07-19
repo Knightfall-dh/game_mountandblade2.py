@@ -405,8 +405,10 @@ class MountAndBladeIIGame(BasicGame):
             old_name = oldProfile.name() if oldProfile else "None"
             new_name = newProfile.name() if newProfile else "None"
             logging.info(f"MountAndBladeIIGame: Profile changed from {old_name} to {new_name}")
-            if hasattr(self, '_config_tab'):
+            if hasattr(self, '_config_tab') and self._config_tab is not None:
                 self._config_tab.refresh_on_profile_change()
+            else:
+                logging.debug("MountAndBladeIIGame: Config tab not initialized, skipping refresh")
         except Exception as e:
             logging.error(f"MountAndBladeIIGame: Profile change handling failed: {str(e)}")
 
