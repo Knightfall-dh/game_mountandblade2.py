@@ -52,9 +52,7 @@ This plugin extends [Mod Organizer 2 (MO2)](https://www.modorganizer.org/) to pr
 ## Installation
 1. Install Mod Organizer 2 (version 2.5.2 or later).
 2. Copy the `basic_games` folder to `MO2/plugins/`.
-3. Ensure dependencies (`PyQt6`, `mobase`) are in `MO2/plugins/plugin_python/libs/`.
-4. Configure MO2 to recognize *Mount & Blade II: Bannerlord* at `S:/Steam/steamapps/common/Mount & Blade II Bannerlord/`.
-5. Create a profile and verify that the **SubModules** and **Mod Configs** tabs appear in MO2’s UI.
+3. Create a portable MO2 instance and verify that the **SubModules** and **Mod Configs** tabs appear in MO2’s UI.
 
 ## Usage
 - **Mod Configs Tab**:
@@ -63,7 +61,7 @@ This plugin extends [Mod Organizer 2 (MO2)](https://www.modorganizer.org/) to pr
 - **SubModules Tab**:
   - Enable/disable submodules to customize your game’s mod load order.
 - **Game Launch**:
-  - Select an executable (e.g., `Mount & Blade II: Bannerlord (Launcher)`) from MO2’s dropdown.
+  - Select an executable (e.g., `Mount & Blade II: Bannerlord`) from MO2’s dropdown.
   - Configs are automatically synced to the game directory before launch and back to the profile after exit.
 
 ## Requirements
