@@ -86,12 +86,12 @@ MO2\plugins\basic_games\
 │   __init__.py   
 │   
 ├───games  
-│   │   game_mountandblade2.py  <--new file
+│   │   game_mountandblade2.py  <--new file  
 │   │   game_oblivion_remaster.py   
 │   │   game_stalkeranomaly.py   
 │   │   __init__.py  
 │   │   
-│   ├───mountandblade2      <--new folder
+│   ├───mountandblade2      <--new folder  
 │   │       mod_config_manager.py  
 │   │       submodule_tab.py   
 │   │       __init__.py   
