@@ -51,8 +51,8 @@ This plugin extends [Mod Organizer 2 (MO2)](https://www.modorganizer.org/) to pr
 
 ## Installation
 1. Install Mod Organizer 2 (version 2.5.2 or later).
-2. Copy the `basic_games` folder to `MO2/plugins/`.
-3. Create a portable MO2 instance and verify that the **SubModules** and **Mod Configs** tabs appear in MO2’s UI.
+2. Copy the `mountandblade2` folder and `game_mountandblade2.py`to `MO2\plugins\basic_games\games`.
+3. Create a new profile and verify that the **SubModules** and **Mod Configs** tabs appear in MO2’s UI.
 
 ## Usage
 - **Mod Configs Tab**:
@@ -86,12 +86,12 @@ MO2\plugins\basic_games\
 │   __init__.py   
 │   
 ├───games  
-│   │   game_mountandblade2.py  
+│   │   game_mountandblade2.py  <--new file
 │   │   game_oblivion_remaster.py   
 │   │   game_stalkeranomaly.py   
 │   │   __init__.py  
 │   │   
-│   ├───mountandblade2   
+│   ├───mountandblade2      <--new folder
 │   │       mod_config_manager.py  
 │   │       submodule_tab.py   
 │   │       __init__.py   
