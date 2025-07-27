@@ -1,23 +1,35 @@
-import os
-import logging
 import json
-from pathlib import Path
-from PyQt6.QtCore import QDir, Qt, QStandardPaths, QUrl, QFileSystemWatcher
-from PyQt6.QtWidgets import QMainWindow, QTreeWidget, QTreeWidgetItem, QPushButton, QVBoxLayout, QWidget, QHeaderView, QMessageBox, QTabWidget, QLabel
-from PyQt6.QtGui import QDesktopServices
-import mobase
+import logging
 import shutil
-from datetime import datetime
+from pathlib import Path
+
+from PyQt6.QtCore import QDir, QFileSystemWatcher, QStandardPaths, Qt, QUrl
+from PyQt6.QtGui import QDesktopServices
+from PyQt6.QtWidgets import (
+    QHeaderView,
+    QLabel,
+    QMainWindow,
+    QMessageBox,
+    QPushButton,
+    QTabWidget,
+    QTreeWidget,
+    QTreeWidgetItem,
+    QVBoxLayout,
+    QWidget,
+)
+
+import mobase
+
 
 class ModConfigManagerWidget(QWidget):
     def __init__(self, parent: QMainWindow, organizer: mobase.IOrganizer):
         super().__init__(parent)
         self._parent = parent
         self._organizer = organizer
-        self._file_timestamps = {}  # Track file modification times
+        self._file_timestamps: dict[str, float] = {}  # Track file modification times
         self._file_watcher = QFileSystemWatcher(self)
-        self._file_watcher.directoryChanged.connect(self._on_directory_changed)
-        self._file_watcher.fileChanged.connect(self._on_file_changed)
+        self._file_watcher.directoryChanged.connect(self._on_directory_changed)  # type: ignore
+        self._file_watcher.fileChanged.connect(self._on_file_changed)  # type: ignore
         self._current_profile_path = Path(self._organizer.profilePath())
         self._init_ui()
         self._setup_watcher()
@@ -35,16 +47,18 @@ class ModConfigManagerWidget(QWidget):
 
         self._config_tree = QTreeWidget(self)
         self._config_tree.setHeaderLabels(["Config File", "Profile Path"])
-        self._config_tree.header().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
+        header = self._config_tree.header()
+        if header is not None:
+            header.setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
         self._config_tree.setSelectionMode(QTreeWidget.SelectionMode.SingleSelection)
         configs_layout.addWidget(self._config_tree)
 
         self._open_button = QPushButton("Open in External Editor", self)
-        self._open_button.clicked.connect(self._open_external)
+        self._open_button.clicked.connect(self._open_external)  # type: ignore
         self._open_button.setEnabled(False)
         configs_layout.addWidget(self._open_button)
 
-        self._config_tree.itemSelectionChanged.connect(self._update_button_state)
+        self._config_tree.itemSelectionChanged.connect(self._update_button_state)  # type: ignore
         self._configs_tab.setLayout(configs_layout)
         self._tab_widget.addTab(self._configs_tab, "Mod Configs")
 
@@ -88,7 +102,7 @@ class ModConfigManagerWidget(QWidget):
 
     def refresh_on_profile_change(self):
         """Refresh configs when profile changes and force sync to game directory."""
-        if hasattr(self, '_refreshing') and self._refreshing:
+        if hasattr(self, "_refreshing") and self._refreshing:
             logging.debug("ModConfigManagerWidget: Skipping refresh due to re-entrant call")
             return
         try:
@@ -117,14 +131,31 @@ class ModConfigManagerWidget(QWidget):
             self._refreshing = False  # Clear guard
 
     def _find_mod_configs(self) -> list[tuple[Path, Path]]:
-        configs = []
+        configs: list[tuple[Path, Path]] = []
         docs_path = Path(QDir(QStandardPaths.writableLocation(QStandardPaths.StandardLocation.DocumentsLocation)).filePath("Mount and Blade II Bannerlord/Configs"))
         profile_path = Path(self._organizer.profilePath()) / "mod_configs"
         config_extensions = {".xml", ".json", ".ini"}
         excluded_files = {"engine_config.txt", "BannerlordConfig.txt", "LauncherData.xml"}
         known_folders = {"Configs", "Config", "Modules", "ModSettings"}
+        
+        # Define excluded directories to avoid processing save games and other non-config files
+        excluded_directories = {"Game Saves", "saves", "Backups", "Logs", "CrashDumps"}
+        
+        # Get the base Documents path to check for save game directory
+        docs_base = Path(QStandardPaths.writableLocation(QStandardPaths.StandardLocation.DocumentsLocation)) / "Mount and Blade II Bannerlord"
+        save_game_path = docs_base / "Game Saves"
 
         for file in docs_path.rglob("*"):
+            # Skip files in excluded directories
+            if any(excluded_dir in file.parts for excluded_dir in excluded_directories):
+                logging.debug(f"Skipping file in excluded directory: {file}")
+                continue
+                
+            # Skip files that are in the save game directory
+            if save_game_path in file.parents:
+                logging.debug(f"Skipping file in save game directory: {file}")
+                continue
+                
             if (file.suffix.lower() in config_extensions and
                 any(folder in file.parts for folder in known_folders) and
                 file.name not in excluded_files):
@@ -145,6 +176,11 @@ class ModConfigManagerWidget(QWidget):
 
         # Check profile configs to include files not in game directory
         for profile_file in profile_path.rglob("*"):
+            # Skip files in excluded directories
+            if any(excluded_dir in profile_file.parts for excluded_dir in excluded_directories):
+                logging.debug(f"Skipping profile file in excluded directory: {profile_file}")
+                continue
+                
             if (profile_file.suffix.lower() in config_extensions and
                 any(folder in profile_file.parts for folder in known_folders) and
                 profile_file.name not in excluded_files):
@@ -234,7 +270,7 @@ class ModConfigManagerWidget(QWidget):
             logging.error(f"ModConfigManagerWidget: Failed to open {profile_path}: {str(e)}")
             QMessageBox.critical(self, "Open Error", f"Failed to open config file: {str(e)}")
 
-    def _clear_game_configs(self, excluded_dirs: set = None):
+    def _clear_game_configs(self, excluded_dirs: set[str] | None = None):
         """Clear all config files in the game directory, except those in excluded directories."""
         try:
             docs_path = Path(QDir(QStandardPaths.writableLocation(QStandardPaths.StandardLocation.DocumentsLocation)).filePath("Mount and Blade II Bannerlord/Configs"))
@@ -242,9 +278,26 @@ class ModConfigManagerWidget(QWidget):
             excluded_files = {"engine_config.txt", "BannerlordConfig.txt", "LauncherData.xml"}
             known_folders = {"Configs", "Config", "Modules", "ModSettings"}
             excluded_dirs = excluded_dirs or set()
+            
+            # Define excluded directories to avoid processing save games and other non-config files
+            excluded_directories = {"Game Saves", "Saves", "SaveGames", "Backups", "Logs", "CrashDumps"}
+            
+            # Get the base Documents path to check for save game directory
+            docs_base = Path(QStandardPaths.writableLocation(QStandardPaths.StandardLocation.DocumentsLocation)) / "Mount and Blade II Bannerlord"
+            save_game_path = docs_base / "Game Saves"
 
             cleared = 0
             for file in docs_path.rglob("*"):
+                # Skip files in excluded directories
+                if any(excluded_dir in file.parts for excluded_dir in excluded_directories):
+                    logging.debug(f"ModConfigManagerWidget: Skipping file in excluded directory during clear: {file}")
+                    continue
+                    
+                # Skip files that are in the save game directory
+                if save_game_path in file.parents:
+                    logging.debug(f"ModConfigManagerWidget: Skipping file in save game directory during clear: {file}")
+                    continue
+                    
                 if (file.suffix.lower() in config_extensions and
                     any(folder in file.parts for folder in known_folders) and
                     file.name not in excluded_files and
@@ -261,8 +314,6 @@ class ModConfigManagerWidget(QWidget):
         try:
             logging.info("ModConfigManagerWidget: Syncing profile configs to game directory")
             configs = self._find_mod_configs()
-            docs_path = Path(QDir(QStandardPaths.writableLocation(QStandardPaths.StandardLocation.DocumentsLocation)).filePath("Mount and Blade II Bannerlord/Configs"))
-            profile_path = Path(self._organizer.profilePath()) / "mod_configs"
             synced = 0
 
             # Clear game config directory to prevent overlap from previous profiles
@@ -316,8 +367,6 @@ class ModConfigManagerWidget(QWidget):
         try:
             logging.info("ModConfigManagerWidget: Syncing game configs to profile")
             configs = self._find_mod_configs()
-            docs_path = Path(QDir(QStandardPaths.writableLocation(QStandardPaths.StandardLocation.DocumentsLocation)).filePath("Mount and Blade II Bannerlord/Configs"))
-            profile_path = Path(self._organizer.profilePath()) / "mod_configs"
             synced = 0
 
             for orig_path, profile_file in configs:
@@ -385,7 +434,7 @@ class ModConfigManagerWidget(QWidget):
     def _compare_files(self, file1: Path, file2: Path) -> bool:
         """Compare two files for equality."""
         try:
-            with open(file1, 'rb') as f1, open(file2, 'rb') as f2:
+            with open(file1, "rb") as f1, open(file2, "rb") as f2:
                 return f1.read() == f2.read()
         except Exception as e:
             logging.error(f"ModConfigManagerWidget: Failed to compare files {file1} and {file2}: {str(e)}")

@@ -1,21 +1,22 @@
-import sys
-import os
 import json
+import logging
+import os
+import sys
+import xml.etree.ElementTree as ET
+from enum import IntEnum
 from pathlib import Path
 from typing import List, Mapping
-from PyQt6.QtCore import QDir, QFileInfo, QStandardPaths, Qt, qInfo, qWarning, qCritical
-from PyQt6.QtWidgets import QMainWindow, QTabWidget, QWidget
-import mobase
-import logging
-import xml.etree.ElementTree as ET
-from collections.abc import Mapping
-from enum import IntEnum
 
-from ..basic_game import BasicGame
-from ..basic_features import BasicLocalSavegames, BasicGameSaveGameInfo
+from PyQt6.QtCore import QDir, QFileInfo, QStandardPaths, qCritical, qInfo, qWarning
+from PyQt6.QtWidgets import QMainWindow, QTabWidget, QWidget
+
+import mobase
+
+from ..basic_features import BasicGameSaveGameInfo, BasicLocalSavegames
 from ..basic_features.basic_save_game_info import BasicGameSaveGame, format_date
-from .mountandblade2.submodule_tab import SubModuleTabWidget
+from ..basic_game import BasicGame
 from .mountandblade2.mod_config_manager import ModConfigManagerWidget
+from .mountandblade2.submodule_tab import SubModuleTabWidget
 
 # Ensure games directory is in sys.path
 games_dir = Path(__file__).parent
@@ -28,11 +29,11 @@ logging.info("MountAndBladeIIGame: Loading plugin")
 class BannerlordSaveGame(BasicGameSaveGame):
     def __init__(self, filepath: Path):
         super().__init__(filepath)
-        self._metadata = self._parse_metadata(filepath)
+        self._metadata: dict[str, str] = self._parse_metadata(filepath)
 
-    def _parse_metadata(self, filepath: Path) -> dict:
+    def _parse_metadata(self, filepath: Path) -> dict[str, str]:
         try:
-            with open(filepath, 'rb') as f:
+            with open(filepath, "rb") as f:
                 data = f.read()
                 start = data.find(b'{"List":')
                 if start == -1:
@@ -46,20 +47,20 @@ class BannerlordSaveGame(BasicGameSaveGame):
                 for i, char in enumerate(data[start:]):
                     if char == ord('"') and not escape:
                         in_string = not in_string
-                    elif char == ord('{') and not in_string:
+                    elif char == ord("{") and not in_string:
                         brace_count += 1
-                    elif char == ord('}') and not in_string:
+                    elif char == ord("}") and not in_string:
                         brace_count -= 1
                         if brace_count == 0:
                             end = start + i + 1
                             break
-                    escape = char == ord('\\') and not escape
+                    escape = char == ord("\\") and not escape
                 
                 if brace_count != 0 or end == start:
                     logging.error(f"Invalid JSON structure in {filepath}: brace count {brace_count}")
                     return {}
                 
-                json_str = data[start:end].decode('utf-8', errors='replace')
+                json_str = data[start:end].decode("utf-8", errors="replace")
                 metadata = json.loads(json_str)
                 return metadata.get("List", {})
         except Exception as e:
@@ -119,12 +120,12 @@ class MountAndBladeIIModDataChecker(mobase.ModDataChecker):
             if e.isDir():
                 if e.name().lower() in self._valid_folders:
                     return mobase.ModDataChecker.VALID
-                if e.exists("SubModule.xml", mobase.IFileTree.FILE):
+                if e.exists("SubModule.xml", mobase.IFileTree.FILE):  # type: ignore
                     return mobase.ModDataChecker.VALID
         return mobase.ModDataChecker.INVALID
 
 class BannerlordModDataContent(mobase.ModDataContent):
-    class Content(IntEnum):
+    class ContentType(IntEnum):
         ASSET_PACK = 0
         DLL = 1
         CONFIG = 2
@@ -135,31 +136,32 @@ class BannerlordModDataContent(mobase.ModDataContent):
 
     def getAllContents(self) -> list[mobase.ModDataContent.Content]:
         return [
-            mobase.ModDataContent.Content(self.Content.ASSET_PACK, "Asset Packs", ":/MO/gui/content/bsa"),
-            mobase.ModDataContent.Content(self.Content.DLL, "DLLs", ":/MO/gui/content/script"),
-            mobase.ModDataContent.Content(self.Content.CONFIG, "Configs", ":/MO/gui/content/inifile"),
-            mobase.ModDataContent.Content(self.Content.SCENE, "Scenes", ":/MO/gui/content/geometries"),
-            mobase.ModDataContent.Content(self.Content.ASSETS, "Assets", ":/MO/gui/content/mesh"),
-            mobase.ModDataContent.Content(self.Content.MUSIC, "Music", ":/MO/gui/content/music"),
-            mobase.ModDataContent.Content(self.Content.CUSTOM_MAP, "World Map", ":/MO/gui/content/texture"),
+            mobase.ModDataContent.Content(self.ContentType.ASSET_PACK, "Asset Packs", ":/MO/gui/content/bsa"),  # type: ignore
+            mobase.ModDataContent.Content(self.ContentType.DLL, "DLLs", ":/MO/gui/content/script"),  # type: ignore
+            mobase.ModDataContent.Content(self.ContentType.CONFIG, "Configs", ":/MO/gui/content/inifile"),  # type: ignore
+            mobase.ModDataContent.Content(self.ContentType.SCENE, "Scenes", ":/MO/gui/content/geometries"),  # type: ignore
+            mobase.ModDataContent.Content(self.ContentType.ASSETS, "Assets", ":/MO/gui/content/mesh"),  # type: ignore
+            mobase.ModDataContent.Content(self.ContentType.MUSIC, "Music", ":/MO/gui/content/music"),  # type: ignore
+            mobase.ModDataContent.Content(self.ContentType.CUSTOM_MAP, "World Map", ":/MO/gui/content/texture"),  # type: ignore
         ]
 
     def getContentsFor(self, filetree: mobase.IFileTree) -> list[int]:
-        content = []
-        extension_map = {
-            "tpac": self.Content.ASSET_PACK,
-            "dll": self.Content.DLL,
-            "ogg": self.Content.MUSIC,
-            "fbx": self.Content.ASSETS,
-            "png": self.Content.ASSETS,
-            "dds": self.Content.ASSETS,
-            "json": self.Content.CONFIG,
-            "xscene": self.Content.SCENE,
+        extension_map: dict[str, int] = {
+            "tpac": self.ContentType.ASSET_PACK,
+            "dll": self.ContentType.DLL,
+            "ogg": self.ContentType.MUSIC,
+            "fbx": self.ContentType.ASSETS,
+            "png": self.ContentType.ASSETS,
+            "dds": self.ContentType.ASSETS,
+            "json": self.ContentType.CONFIG,
+            "xscene": self.ContentType.SCENE,
         }
+        content: list[int] = []
+
         def walk_content(path: str, entry: mobase.FileTreeEntry) -> mobase.IFileTree.WalkReturn:
             if entry.isFile():
                 if entry.name().lower() == "settlements_distance_cache.bin":
-                    content.append(self.Content.CUSTOM_MAP)
+                    content.append(self.ContentType.CUSTOM_MAP)
                 ext = entry.suffix().lower()
                 if ext in extension_map:
                     content.append(extension_map[ext])
@@ -196,15 +198,15 @@ class MountAndBladeIIGame(BasicGame):
 
     def __init__(self):
         super().__init__()
-        self._submodule_tab = None
-        self._config_tab = None
-        self._organizer = None
-        self._main_window = None
+        self._submodule_tab: SubModuleTabWidget | None = None
+        self._config_tab: ModConfigManagerWidget | None = None
+        self._organizer: mobase.IOrganizer | None = None
+        self._main_window: QMainWindow | None = None
 
     def init(self, organizer: mobase.IOrganizer):
         try:
             logging.info("MountAndBladeIIGame: Starting init")
-            self._organizer = organizer
+            self._organizer = organizer  # type: ignore
             self._register_feature(MountAndBladeIIModDataChecker())
             self._register_feature(BannerlordModDataContent())
             self._register_feature(BasicGameSaveGameInfo(get_metadata=getMetadata, get_preview=get_preview, max_width=400))
@@ -234,6 +236,8 @@ class MountAndBladeIIGame(BasicGame):
 
     def _get_enabled_mods(self) -> List[str]:
         """Get enabled mods in profile priority order."""
+        if self._organizer is None:
+            return []
         mod_list = self._organizer.modList()
         mods = mod_list.allModsByProfilePriority()
         enabled_mods = [mod for mod in mods if mod_list.state(mod) & mobase.ModState.ACTIVE]
@@ -249,20 +253,22 @@ class MountAndBladeIIGame(BasicGame):
                 return load_order
         
         # Fallback to parsing SubModule.xml files
-        load_order = []
+        load_order: list[str] = []
         try:
             enabled_mods = self._get_enabled_mods()
             game_path = Path(self._gamePath)
+            if self._organizer is None:
+                return load_order
             for mod in enabled_mods:
                 # Check MO2 mod directory
-                mod_path = Path(self._organizer.getMod(mod).absolutePath()) / "SubModule.xml"
+                mod_path = Path(self._organizer.getMod(mod).absolutePath()) / "SubModule.xml"  # type: ignore
                 if mod_path.exists() and mod_path.stat().st_size > 0:
                     try:
                         tree = ET.parse(mod_path)
                         root = tree.getroot()
                         module_id = root.find(".//Id[@value]")
                         if module_id is not None and module_id.get("value"):
-                            load_order.append(module_id.get("value"))
+                            load_order.append(module_id.get("value") or "")
                             logging.debug(f"MountAndBladeIIGame: Added mod {mod} with ID {module_id.get('value')}")
                         else:
                             logging.warning(f"MountAndBladeIIGame: No Id tag found in SubModule.xml for mod {mod}")
@@ -277,7 +283,7 @@ class MountAndBladeIIGame(BasicGame):
                             root = tree.getroot()
                             module_id = root.find(".//Id[@value]")
                             if module_id is not None and module_id.get("value"):
-                                load_order.append(module_id.get("value"))
+                                load_order.append(module_id.get("value") or "")
                                 logging.debug(f"MountAndBladeIIGame: Added native mod {mod} with ID {module_id.get('value')}")
                             else:
                                 logging.warning(f"MountAndBladeIIGame: No Id tag found in SubModule.xml for native mod {mod}")
@@ -305,9 +311,9 @@ class MountAndBladeIIGame(BasicGame):
 
     def _sort_load_order(self, load_order: List[str]) -> List[str]:
         """Sort load order based on SubModule.xml dependencies."""
-        dependencies = {}
+        dependencies: dict[str, list[str]] = {}
         game_path = Path(self._gamePath)
-        mod_paths = {mod: Path(self._organizer.getMod(mod).absolutePath()) if mod in self._organizer.modList().allMods()
+        mod_paths = {mod: Path(self._organizer.getMod(mod).absolutePath()) if mod in self._organizer.modList().allMods()  # type: ignore
                      else game_path / "Modules" / mod for mod in load_order}
 
         for mod in load_order:
@@ -316,7 +322,7 @@ class MountAndBladeIIGame(BasicGame):
                 try:
                     tree = ET.parse(mod_path)
                     root = tree.getroot()
-                    deps = []
+                    deps: list[str] = []
                     for dep in root.findall(".//DependedModule[@Id]"):
                         dep_id = dep.get("Id")
                         if dep_id in load_order:
@@ -331,9 +337,9 @@ class MountAndBladeIIGame(BasicGame):
                 logging.warning(f"MountAndBladeIIGame: SubModule.xml not found for {mod} during sorting")
 
         # Topological sort
-        sorted_order = []
-        visited = set()
-        def dfs(mod):
+        sorted_order: list[str] = []
+        visited: set[str] = set()
+        def dfs(mod: str) -> None:
             if mod in visited:
                 return
             visited.add(mod)
@@ -358,6 +364,9 @@ class MountAndBladeIIGame(BasicGame):
             return True
 
         try:
+            if self._organizer is None:
+                qInfo("MountAndBladeIIGame: Organizer not initialized, using default launch")
+                return True
             if not self._organizer.pluginSetting(self.name(), "enforce_load_order"):
                 qInfo("MountAndBladeIIGame: Load order enforcement disabled, using default launch")
                 return True
@@ -376,7 +385,7 @@ class MountAndBladeIIGame(BasicGame):
                 return True
 
             # Construct CLI arguments as a list
-            load_order_str = '*'.join(load_order)
+            load_order_str = "*".join(load_order)
             cli_args = ["/singleplayer", f"_MODULES_*{load_order_str}*_MODULES_", "--mo2-processed"]
             qInfo(f"MountAndBladeIIGame: Launching {exe_path} with args: {cli_args}")
 
@@ -392,8 +401,8 @@ class MountAndBladeIIGame(BasicGame):
         """Sync game directory configs to profile after game completion."""
         try:
             logging.info(f"MountAndBladeIIGame: Post-run sync for {appName}, result: {result}")
-            if hasattr(self, '_config_tab'):
-                self._config_tab.sync_to_profile()
+            if self._config_tab is not None:
+                self._config_tab.sync_to_profile()  # type: ignore
             else:
                 logging.warning("MountAndBladeIIGame: Config tab not initialized, skipping sync")
         except Exception as e:
@@ -405,7 +414,7 @@ class MountAndBladeIIGame(BasicGame):
             old_name = oldProfile.name() if oldProfile else "None"
             new_name = newProfile.name() if newProfile else "None"
             logging.info(f"MountAndBladeIIGame: Profile changed from {old_name} to {new_name}")
-            if hasattr(self, '_config_tab') and self._config_tab is not None:
+            if hasattr(self, "_config_tab") and self._config_tab is not None:
                 self._config_tab.refresh_on_profile_change()
             else:
                 logging.debug("MountAndBladeIIGame: Config tab not initialized, skipping refresh")
@@ -415,6 +424,9 @@ class MountAndBladeIIGame(BasicGame):
     def init_tab(self, main_window: QMainWindow):
         try:
             logging.info("MountAndBladeIIGame: Initializing tabs")
+            if self._organizer is None:
+                logging.warning("MountAndBladeIIGame: Organizer not initialized, skipping tab initialization")
+                return
             if self._organizer.managedGame() != self:
                 logging.info("MountAndBladeIIGame: Not the managed game, skipping tab initialization")
                 return
@@ -428,7 +440,7 @@ class MountAndBladeIIGame(BasicGame):
                 return
 
             # Initialize SubModules tab
-            self._submodule_tab = SubModuleTabWidget(main_window, self._organizer)
+            self._submodule_tab = SubModuleTabWidget(main_window, self._organizer)  # type: ignore
             plugin_tab = tab_widget.findChild(QWidget, "espTab")
             tab_index = tab_widget.indexOf(plugin_tab) + 1
             if not tab_widget.isTabVisible(tab_index):
@@ -437,7 +449,7 @@ class MountAndBladeIIGame(BasicGame):
             logging.info(f"MountAndBladeIIGame: SubModules tab inserted at index {tab_index}")
 
             # Initialize Mod Configs tab
-            self._config_tab = ModConfigManagerWidget(main_window, self._organizer)
+            self._config_tab = ModConfigManagerWidget(main_window, self._organizer)  # type: ignore
             tab_index += 1
             if not tab_widget.isTabVisible(tab_index):
                 tab_index += 1
@@ -467,13 +479,14 @@ class MountAndBladeIIGame(BasicGame):
     def listSaves(self, folder: QDir) -> list[mobase.ISaveGame]:
         try:
             ext = self._mappings.savegameExtension.get()
-            saves = []
-            skipped_files = []
+            saves: list[mobase.ISaveGame] = []
+            skipped_files: list[str] = []
             for path in Path(folder.absolutePath()).glob(f"*.{ext}"):
                 try:
-                    save = BannerlordSaveGame(path)
-                    saves.append(save)
+                    save: mobase.ISaveGame = BannerlordSaveGame(path)
+                    saves.append(save)  # type: ignore
                 except Exception as e:
+                    logging.debug(f"Skipped invalid save file {path}: {e}")
                     skipped_files.append(str(path))
             if skipped_files:
                 logging.debug(f"Skipped {len(skipped_files)} invalid save files in {folder.absolutePath()}")
